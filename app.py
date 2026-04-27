@@ -33,7 +33,6 @@ def build_ui() -> gr.Blocks:
             label="Matching Social Posts and Comments",
             lines=24,
             max_lines=40,
-            show_copy_button=True,
         )
         pdf_file = gr.File(label="PDF Report")
 
