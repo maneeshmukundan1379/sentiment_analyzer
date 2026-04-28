@@ -18,11 +18,11 @@ from core.records import deserialize_records
 
 
 SENTIMENT_STYLES = {
-    "Positive": {"fill": (220, 252, 231), "line": (34, 197, 94), "text": (22, 101, 52)},
-    "Negative": {"fill": (254, 226, 226), "line": (239, 68, 68), "text": (153, 27, 27)},
-    "Neutral": {"fill": (241, 245, 249), "line": (148, 163, 184), "text": (51, 65, 85)},
-    "Mixed": {"fill": (254, 243, 199), "line": (245, 158, 11), "text": (146, 64, 14)},
-    "Unknown": {"fill": (224, 231, 255), "line": (99, 102, 241), "text": (55, 48, 163)},
+    "Positive": {"fill": (229, 247, 245), "line": (32, 161, 151), "text": (17, 117, 109)},
+    "Negative": {"fill": (253, 232, 239), "line": (190, 48, 92), "text": (145, 36, 70)},
+    "Neutral": {"fill": (244, 246, 248), "line": (160, 166, 176), "text": (83, 91, 103)},
+    "Mixed": {"fill": (255, 244, 229), "line": (237, 147, 55), "text": (153, 89, 22)},
+    "Unknown": {"fill": (238, 242, 255), "line": (109, 123, 186), "text": (73, 84, 143)},
 }
 SENTIMENT_ORDER = ["Positive", "Negative", "Neutral", "Mixed", "Unknown"]
 STOPWORDS = {
@@ -102,6 +102,35 @@ def _record_date(record: dict) -> str:
     return datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime("%m/%d")
 
 
+def _usable_width(pdf: FPDF) -> float:
+    return pdf.w - pdf.l_margin - pdf.r_margin
+
+
+def _draw_panel(pdf: FPDF, x: float, y: float, w: float, h: float, *, fill: tuple[int, int, int] = (255, 255, 255)) -> None:
+    pdf.set_draw_color(226, 232, 240)
+    pdf.set_fill_color(*fill)
+    pdf.rect(x, y, w, h, style="DF", round_corners=True, corner_radius=2)
+
+
+def _section_title(pdf: FPDF, title: str, subtitle: str = "") -> None:
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.set_text_color(17, 24, 39)
+    pdf.cell(0, 5, _pdf_safe_text(title), new_x="LMARGIN", new_y="NEXT")
+    if subtitle:
+        pdf.set_font("Helvetica", size=7)
+        pdf.set_text_color(100, 116, 139)
+        pdf.multi_cell(0, 4, _pdf_safe_text(subtitle), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_text_color(0, 0, 0)
+
+
+def _sentiment_score(records: list[dict]) -> int:
+    if not records:
+        return 0
+    weights = {"Positive": 100, "Mixed": 25, "Neutral": 0, "Unknown": 0, "Negative": -100}
+    total = sum(weights.get(normalize_sentiment(record.get("sentiment")), 0) for record in records)
+    return int(round(total / len(records)))
+
+
 # Compute shared summary totals used by the PDF cover and section summaries.
 def _summary_counts(records: list[dict]) -> tuple[int, int, Counter]:
     total_comments = sum(1 for record in records if record.get("kind") == "comment")
@@ -110,6 +139,235 @@ def _summary_counts(records: list[dict]) -> tuple[int, int, Counter]:
         normalize_sentiment(record.get("sentiment")) for record in records
     )
     return total_comments, total_posts, sentiment_counts
+
+
+def _render_dashboard_header(pdf: FPDF, keyword: str) -> None:
+    pdf.set_fill_color(237, 246, 249)
+    pdf.rect(0, 0, pdf.w, 7, style="F")
+    pdf.set_draw_color(226, 232, 240)
+    pdf.line(0, 14, pdf.w, 14)
+
+    pdf.set_xy(pdf.l_margin, 8)
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.set_text_color(32, 161, 151)
+    pdf.cell(12, 4, "SA")
+    pdf.set_font("Helvetica", size=7)
+    pdf.set_text_color(100, 116, 139)
+    for item in ["Feed", "Analyze", "Overview", "Reports", "Actions"]:
+        pdf.cell(24, 4, item)
+
+    pdf.set_xy(pdf.l_margin, 24)
+    pdf.set_font("Helvetica", "B", 17)
+    pdf.set_text_color(17, 24, 39)
+    pdf.cell(0, 8, "Sentiment Dashboard", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", size=8)
+    pdf.set_text_color(100, 116, 139)
+    pdf.cell(0, 5, _pdf_safe_text("Find out how your topic is perceived online."), new_x="LMARGIN", new_y="NEXT")
+
+    chip_y = 24
+    chip_w = 44
+    right_x = pdf.w - pdf.r_margin - chip_w
+    for label in [datetime.now(timezone.utc).strftime("%Y-%m-%d"), keyword or "Keyword"]:
+        pdf.set_xy(right_x, chip_y)
+        _draw_panel(pdf, right_x, chip_y, chip_w, 8, fill=(255, 255, 255))
+        pdf.set_xy(right_x + 3, chip_y + 2.2)
+        pdf.set_font("Helvetica", "B", 7)
+        pdf.set_text_color(51, 65, 85)
+        pdf.cell(chip_w - 6, 3, _pdf_safe_text(label[:28]))
+        right_x -= chip_w + 4
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_y(45)
+
+
+def _render_topic_overview(pdf: FPDF, records: list[dict]) -> None:
+    total_comments, total_posts, sentiment_counts = _summary_counts(records)
+    platform_counts = Counter(str(record.get("platform") or "Unknown") for record in records)
+    x = pdf.l_margin
+    y = pdf.get_y()
+    w = _usable_width(pdf)
+    h = 54
+    _draw_panel(pdf, x, y, w, h)
+    pdf.set_xy(x + 5, y + 5)
+    _section_title(pdf, "Topic Overview", "See how many people are talking, where conversations happen, and the current sentiment mix.")
+
+    kpi_y = y + 22
+    kpi_w = 36
+    kpis = [
+        ("Mentions", len(records), "Total social records"),
+        ("Comments", total_comments, "Conversation replies"),
+        ("Posts", total_posts, "Original posts"),
+    ]
+    for index, (label, value, sublabel) in enumerate(kpis):
+        card_x = x + 5 + index * 46
+        pdf.set_xy(card_x, kpi_y)
+        pdf.set_font("Helvetica", "B", 8)
+        pdf.set_text_color(71, 85, 105)
+        pdf.cell(kpi_w, 4, label)
+        pdf.set_xy(card_x, kpi_y + 7)
+        pdf.set_font("Helvetica", "B", 17)
+        pdf.set_text_color(17, 24, 39)
+        pdf.cell(kpi_w, 7, str(value))
+        pdf.set_xy(card_x, kpi_y + 18)
+        pdf.set_font("Helvetica", size=7)
+        pdf.set_text_color(100, 116, 139)
+        pdf.cell(kpi_w, 4, sublabel)
+
+    dist_x = x + w - 54
+    dist_y = kpi_y
+    pdf.set_xy(dist_x, dist_y)
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.set_text_color(71, 85, 105)
+    pdf.cell(0, 4, "Sources Distribution")
+    max_platform = max(platform_counts.values(), default=1)
+    for row, platform in enumerate(PLATFORM_ORDER):
+        count = platform_counts.get(platform, 0)
+        bar_y = dist_y + 8 + row * 8
+        pdf.set_xy(dist_x, bar_y)
+        pdf.set_font("Helvetica", size=7)
+        pdf.set_text_color(71, 85, 105)
+        pdf.cell(18, 4, platform)
+        pdf.set_fill_color(238, 242, 246)
+        pdf.rect(dist_x + 19, bar_y + 1, 23, 3, style="F")
+        pdf.set_fill_color(32, 161, 151)
+        pdf.rect(dist_x + 19, bar_y + 1, 23 * count / max_platform, 3, style="F")
+        pdf.set_xy(dist_x + 43, bar_y)
+        pdf.cell(8, 4, str(count), align="R")
+
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_y(y + h + 5)
+
+
+def _render_sentiment_dashboard_panel(pdf: FPDF, records: list[dict]) -> None:
+    counts = Counter(normalize_sentiment(record.get("sentiment")) for record in records)
+    total = len(records) or 1
+    score = _sentiment_score(records)
+    x = pdf.l_margin
+    y = pdf.get_y()
+    w = _usable_width(pdf)
+    h = 66
+    _draw_panel(pdf, x, y, w, h)
+    pdf.set_xy(x + 5, y + 5)
+    _section_title(pdf, "Sentiment Score", "Know if people are talking positively or negatively about the topic.")
+
+    score_x = x + 8
+    score_y = y + 28
+    score_color = (32, 161, 151) if score >= 20 else (190, 48, 92) if score < 0 else (160, 166, 176)
+    _draw_panel(pdf, score_x, score_y, 39, 26, fill=(255, 255, 255))
+    pdf.set_xy(score_x + 2, score_y + 5)
+    pdf.set_font("Helvetica", "B", 19)
+    pdf.set_text_color(17, 24, 39)
+    pdf.cell(35, 8, str(score), align="C")
+    pdf.set_fill_color(238, 242, 246)
+    pdf.rect(score_x + 5, score_y + 18, 29, 2.5, style="F")
+    pdf.set_fill_color(*score_color)
+    pdf.rect(score_x + 5, score_y + 18, 29 * max(0, score + 100) / 200, 2.5, style="F")
+    pdf.set_xy(score_x, score_y + 29)
+    pdf.set_font("Helvetica", size=6)
+    pdf.set_text_color(148, 163, 184)
+    pdf.cell(8, 3, "-100")
+    pdf.set_x(score_x + 30)
+    pdf.cell(8, 3, "100")
+
+    copy_x = x + 58
+    pdf.set_xy(copy_x, y + 28)
+    pdf.set_font("Helvetica", "B", 9)
+    pdf.set_text_color(17, 24, 39)
+    pdf.cell(50, 5, "Analyzed Mentions")
+    pdf.set_xy(copy_x, y + 36)
+    pdf.set_font("Helvetica", size=8)
+    pdf.set_text_color(71, 85, 105)
+    for sentiment in ["Positive", "Neutral", "Negative"]:
+        pdf.cell(60, 5, _pdf_safe_text(f"{counts.get(sentiment, 0)} with {sentiment.lower()} sentiment"), new_x="LMARGIN", new_y="NEXT")
+        pdf.set_x(copy_x)
+
+    bar_x = x + 112
+    bar_y = y + 34
+    bar_w = 42
+    cursor = bar_x
+    for sentiment in ["Positive", "Negative", "Neutral", "Mixed", "Unknown"]:
+        count = counts.get(sentiment, 0)
+        if not count:
+            continue
+        segment_w = bar_w * count / total
+        pdf.set_fill_color(*_sentiment_style(sentiment)["line"])
+        pdf.rect(cursor, bar_y, segment_w, 18, style="F")
+        cursor += segment_w
+    pdf.set_xy(bar_x, bar_y + 22)
+    pdf.set_font("Helvetica", size=7)
+    pdf.set_text_color(71, 85, 105)
+    pdf.cell(bar_w, 4, "Sentiment ratio", align="C")
+
+    note_x = x + w - 52
+    note_y = y + 31
+    dominant = counts.most_common(1)[0][0] if counts else "Unknown"
+    dominant_style = _sentiment_style(dominant)
+    _draw_panel(pdf, note_x, note_y, 44, 24, fill=dominant_style["fill"])
+    pdf.set_xy(note_x + 4, note_y + 5)
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.set_text_color(*dominant_style["text"])
+    pdf.cell(36, 4, _pdf_safe_text(f"Mostly {dominant.lower()}"))
+    pdf.set_xy(note_x + 4, note_y + 11)
+    pdf.set_font("Helvetica", size=7)
+    pdf.multi_cell(36, 4, _pdf_safe_text("Dominant tone in the current conversation set."), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_y(y + h + 5)
+
+
+def _render_location_dashboard_panel(pdf: FPDF, records: list[dict]) -> None:
+    location_counts: dict[str, Counter] = {}
+    for record in records:
+        location = str(record.get("location") or "N/A").strip()
+        if not location or location.upper() == "N/A":
+            continue
+        location_counts.setdefault(location, Counter())[normalize_sentiment(record.get("sentiment"))] += 1
+    if not location_counts:
+        return
+
+    rows = sorted(location_counts.items(), key=lambda item: sum(item[1].values()), reverse=True)[:5]
+    x = pdf.l_margin
+    y = pdf.get_y()
+    w = _usable_width(pdf)
+    h = 26 + len(rows) * 9
+    _ensure_space(pdf, h)
+    _draw_panel(pdf, x, y, w, h)
+    pdf.set_xy(x + 5, y + 5)
+    _section_title(pdf, "Sentiment In Popular Locations", "Use location signals to target follow-up messaging more effectively.")
+    table_y = y + 21
+    pdf.set_font("Helvetica", "B", 7)
+    pdf.set_text_color(71, 85, 105)
+    pdf.set_xy(x + 5, table_y)
+    pdf.cell(70, 4, "Location")
+    pdf.cell(70, 4, "Sentiment ratio")
+    pdf.cell(20, 4, "Mentions", align="R")
+    pdf.cell(22, 4, "Net", align="R")
+
+    for index, (location, counts) in enumerate(rows):
+        row_y = table_y + 7 + index * 9
+        total = sum(counts.values()) or 1
+        net = int(round((counts.get("Positive", 0) - counts.get("Negative", 0)) * 100 / total))
+        pdf.set_xy(x + 5, row_y)
+        pdf.set_font("Helvetica", size=8)
+        pdf.set_text_color(17, 24, 39)
+        pdf.cell(70, 4, _pdf_safe_text(location[:34]))
+        bar_x = x + 75
+        cursor = bar_x
+        for sentiment in ["Negative", "Positive", "Neutral", "Mixed"]:
+            count = counts.get(sentiment, 0)
+            if count <= 0:
+                continue
+            segment_w = 70 * count / total
+            pdf.set_fill_color(*_sentiment_style(sentiment)["line"])
+            pdf.rect(cursor, row_y + 1, segment_w, 3, style="F")
+            cursor += segment_w
+        pdf.set_xy(x + 148, row_y)
+        pdf.cell(20, 4, str(total), align="R")
+        pdf.set_xy(x + 171, row_y)
+        pdf.set_fill_color(229, 247, 245) if net >= 0 else pdf.set_fill_color(253, 232, 239)
+        pdf.set_text_color(17, 117, 109) if net >= 0 else pdf.set_text_color(145, 36, 70)
+        pdf.set_font("Helvetica", "B", 7)
+        pdf.cell(14, 4, str(net), align="C", fill=True)
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_y(y + h + 5)
 
 
 # Render the per-platform summary cards and sentiment breakdown table.
@@ -121,9 +379,9 @@ def _render_summary(pdf: FPDF, records: list[dict], title: str) -> None:
     pdf.set_draw_color(225, 230, 240)
     summary_width = (pdf.w - pdf.l_margin - pdf.r_margin - 8) / 3
     summary_items = [
-        ("Total Matches", str(len(records)), (13, 39, 92), (255, 255, 255)),
-        ("Comments", str(total_comments), (46, 125, 246), (255, 255, 255)),
-        ("Posts", str(total_posts), (15, 118, 110), (255, 255, 255)),
+        ("Total Matches", str(len(records)), (17, 24, 39), (255, 255, 255)),
+        ("Comments", str(total_comments), (32, 161, 151), (255, 255, 255)),
+        ("Posts", str(total_posts), (83, 91, 103), (255, 255, 255)),
     ]
     start_x = pdf.l_margin
     start_y = pdf.get_y()
@@ -276,7 +534,7 @@ def _render_themes(pdf: FPDF, records: list[dict], keyword: str) -> None:
         _ensure_space(pdf, 8)
         pdf.set_font("Helvetica", size=9)
         pdf.cell(label_w, 6, _pdf_safe_text(word.title()))
-        pdf.set_fill_color(37, 99, 235)
+        pdf.set_fill_color(32, 161, 151)
         pdf.rect(pdf.get_x(), pdf.get_y() + 1.5, chart_w * count / max_count, 3.5, style="F")
         pdf.set_x(pdf.get_x() + chart_w + 4)
         pdf.cell(10, 6, str(count), align="R", new_x="LMARGIN", new_y="NEXT")
@@ -368,6 +626,62 @@ def _render_marketing_insights(pdf: FPDF, records: list[dict], keyword: str) -> 
     _render_positive_quotes(pdf, records)
 
 
+def _render_label_value(pdf: FPDF, label: str, value: object, *, line_height: float = 6) -> None:
+    pdf.set_font("Helvetica", "B", 9)
+    pdf.set_text_color(51, 65, 85)
+    pdf.cell(34, line_height, _pdf_safe_text(label))
+    pdf.set_font("Helvetica", size=9)
+    pdf.set_text_color(15, 23, 42)
+    pdf.multi_cell(
+        0,
+        line_height,
+        _pdf_safe_text(str(value or "N/A")),
+        align="L",
+        new_x="LMARGIN",
+        new_y="NEXT",
+    )
+
+
+def _render_sentiment_badge(pdf: FPDF, sentiment: str, x: float, y: float) -> None:
+    style = _sentiment_style(sentiment)
+    pdf.set_xy(x, y)
+    pdf.set_fill_color(*style["fill"])
+    pdf.set_draw_color(*style["line"])
+    pdf.set_text_color(*style["text"])
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.cell(27, 6, _pdf_safe_text(sentiment), border=1, align="C", fill=True)
+    pdf.set_text_color(0, 0, 0)
+
+
+def _render_callout(
+    pdf: FPDF,
+    title: str,
+    body: object,
+    *,
+    fill: tuple[int, int, int],
+    line: tuple[int, int, int],
+    text: tuple[int, int, int] = (15, 23, 42),
+) -> None:
+    clean_body = _pdf_safe_text(str(body or "N/A").strip() or "N/A")
+    _ensure_space(pdf, 22)
+    x = pdf.l_margin
+    y = pdf.get_y()
+    w = pdf.w - pdf.l_margin - pdf.r_margin
+    pdf.set_fill_color(*fill)
+    pdf.set_draw_color(*line)
+    pdf.rect(x, y, w, 9, style="DF")
+    pdf.set_xy(x + 3, y + 2)
+    pdf.set_font("Helvetica", "B", 9)
+    pdf.set_text_color(*text)
+    pdf.cell(w - 6, 4, _pdf_safe_text(title))
+    pdf.set_y(y + 11)
+    pdf.set_x(x + 3)
+    pdf.set_font("Helvetica", size=9)
+    pdf.set_text_color(15, 23, 42)
+    pdf.multi_cell(w - 6, 5, clean_body, align="L", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(2)
+
+
 # Render the first-page platform count box below the title header.
 def _render_cover_platform_counts(pdf: FPDF, records: list[dict]) -> None:
     counts = Counter(str(record.get("platform") or "Unknown") for record in records)
@@ -406,58 +720,77 @@ def _render_cover_platform_counts(pdf: FPDF, records: list[dict]) -> None:
 def _render_details(pdf: FPDF, records: list[dict]) -> None:
     pdf.set_font("Helvetica", "B", 12)
     pdf.cell(0, 8, "Detailed Results", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Helvetica", size=11)
     for index, record in enumerate(records):
+        _ensure_space(pdf, 58)
         platform = str(record.get("platform") or "Unknown")
         current_link_label = link_label(platform)
         sentiment = normalize_sentiment(record.get("sentiment"))
         style = _sentiment_style(sentiment)
+        card_x = pdf.l_margin
+        card_y = pdf.get_y()
+        card_w = pdf.w - pdf.l_margin - pdf.r_margin
+
         pdf.set_fill_color(*style["fill"])
         pdf.set_draw_color(*style["line"])
         pdf.set_text_color(*style["text"])
         pdf.set_font("Helvetica", "B", 11)
-        pdf.cell(
-            0,
-            8,
-            _pdf_safe_text(f"{platform} | {str(record.get('kind') or 'match').title()} | {sentiment}"),
-            border=1,
-            fill=True,
-            new_x="LMARGIN",
-            new_y="NEXT",
-        )
+        pdf.rect(card_x, card_y, card_w, 10, style="DF")
+        pdf.set_xy(card_x + 3, card_y + 2)
+        pdf.cell(card_w - 36, 5, _pdf_safe_text(f"{platform} | {str(record.get('kind') or 'match').title()}"))
+        _render_sentiment_badge(pdf, sentiment, card_x + card_w - 31, card_y + 2)
         pdf.set_text_color(0, 0, 0)
-        pdf.set_font("Helvetica", size=11)
-        lines = [
-            f"User ID: {record.get('user_id', 'Unknown')}",
-            f"Location: {record.get('location', 'N/A')}",
-            f"Subject: {record.get('subject', '') or 'N/A'}",
-            f"Comment: {record.get('text', '')}",
-            f"Date: {format_timestamp(float(record.get('created_utc') or 0))}",
-            f"Sentiment: {record.get('sentiment', 'Unknown')}",
-            f"Suggested Response: {record.get('response', '') or 'N/A'}",
-            f"{current_link_label}: {record.get('permalink', '')}",
+        pdf.set_y(card_y + 13)
+
+        metadata_y = pdf.get_y()
+        column_w = card_w / 3
+        metadata = [
+            ("User ID", record.get("user_id", "Unknown")),
+            ("Location", record.get("location", "N/A")),
+            ("Date", format_timestamp(float(record.get("created_utc") or 0))),
         ]
-        for line in lines:
-            clean_line = _pdf_safe_text(line.strip())
-            if not clean_line:
-                continue
-            if clean_line.startswith(f"{current_link_label}: "):
-                url = line.split(f"{current_link_label}: ", 1)[1].strip()
-                pdf.set_text_color(0, 102, 204)
-                pdf.multi_cell(
-                    0,
-                    7,
-                    _pdf_safe_text(f"{current_link_label}: {url}"),
-                    align="L",
-                    link=url,
-                    new_x="LMARGIN",
-                    new_y="NEXT",
-                )
-                pdf.set_text_color(0, 0, 0)
-            else:
-                pdf.multi_cell(0, 7, clean_line, align="L", new_x="LMARGIN", new_y="NEXT")
+        for col_index, (label, value) in enumerate(metadata):
+            x = card_x + col_index * column_w
+            pdf.set_xy(x, metadata_y)
+            pdf.set_font("Helvetica", "B", 8)
+            pdf.set_text_color(71, 85, 105)
+            pdf.cell(column_w, 4, _pdf_safe_text(label))
+            pdf.set_xy(x, metadata_y + 4)
+            pdf.set_font("Helvetica", size=8)
+            pdf.set_text_color(15, 23, 42)
+            pdf.multi_cell(column_w - 4, 4, _pdf_safe_text(str(value or "N/A")), align="L")
+        pdf.set_text_color(0, 0, 0)
+        pdf.set_y(metadata_y + 13)
+
+        _render_label_value(pdf, "Subject", record.get("subject", "") or "N/A")
+        _render_callout(
+            pdf,
+            "Comment / Post Text",
+            record.get("text", ""),
+            fill=(248, 250, 252),
+            line=(203, 213, 225),
+        )
+        _render_callout(
+            pdf,
+            "Suggested Response",
+            record.get("response", "") or "N/A",
+            fill=style["fill"],
+            line=style["line"],
+            text=style["text"],
+        )
+
+        url = str(record.get("permalink", "") or "").strip()
+        if url:
+            pdf.set_font("Helvetica", "B", 9)
+            pdf.set_text_color(51, 65, 85)
+            pdf.cell(34, 6, _pdf_safe_text(current_link_label))
+            pdf.set_font("Helvetica", size=9)
+            pdf.set_text_color(0, 102, 204)
+            pdf.multi_cell(0, 6, _pdf_safe_text(url), align="L", link=url, new_x="LMARGIN", new_y="NEXT")
+            pdf.set_text_color(0, 0, 0)
+
         if index < len(records) - 1:
             y = pdf.get_y() + 1
+            pdf.set_draw_color(203, 213, 225)
             pdf.line(pdf.l_margin, y, pdf.w - pdf.r_margin, y)
             pdf.ln(5)
 
@@ -487,33 +820,10 @@ def generate_pdf_report(records_payload: str, keyword: str = "") -> tuple[str, s
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
-    pdf.set_fill_color(13, 39, 92)
-    pdf.set_text_color(255, 255, 255)
-    pdf.rect(pdf.l_margin, 12, pdf.w - pdf.l_margin - pdf.r_margin, 24, style="F")
-    pdf.set_xy(pdf.l_margin + 5, 16)
-    pdf.set_font("Helvetica", "B", 17)
-    title = f'Sentiment Analyzer for "{clean_keyword or "Keyword"}"'
-    pdf.cell(
-        pdf.w - pdf.l_margin - pdf.r_margin - 10,
-        8,
-        _pdf_safe_text(title),
-        align="C",
-        new_x="LMARGIN",
-        new_y="NEXT",
-    )
-    pdf.set_x(pdf.l_margin + 5)
-    pdf.set_font("Helvetica", size=10)
-    pdf.cell(
-        pdf.w - pdf.l_margin - pdf.r_margin - 10,
-        6,
-        _pdf_safe_text(datetime.now(timezone.utc).strftime("Generated on %Y-%m-%d %H:%M UTC")),
-        align="C",
-        new_y="NEXT",
-    )
-    pdf.set_text_color(0, 0, 0)
-    pdf.ln(10)
-    _render_cover_platform_counts(pdf, records)
-    _render_summary(pdf, records, "Overall Summary")
+    _render_dashboard_header(pdf, clean_keyword)
+    _render_topic_overview(pdf, records)
+    _render_sentiment_dashboard_panel(pdf, records)
+    _render_location_dashboard_panel(pdf, records)
     _render_marketing_insights(pdf, records, clean_keyword)
 
     for index, platform in enumerate(PLATFORM_ORDER):
