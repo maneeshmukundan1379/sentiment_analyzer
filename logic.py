@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
-from core.formatting import dedupe_records, format_records_for_textbox, platform_counts, sort_records
+from core.formatting import dedupe_records, format_records_for_html, platform_counts, sort_records
 from core.platforms import FACEBOOK_PLATFORM, REDDIT_PLATFORM, X_PLATFORM, platform_list_text
 from core.records import serialize_records
 from core.time_window import lookback_past_text
@@ -97,4 +97,4 @@ def search_social_keyword(keyword: str) -> tuple[str, str, str, str, str]:
     )
     if warnings:
         status += " Warnings: " + "; ".join(warnings)
-    return status, format_records_for_textbox(enriched, clean_keyword), "", clean_keyword, serialize_records(enriched)
+    return status, format_records_for_html(enriched, clean_keyword), "", clean_keyword, serialize_records(enriched)
