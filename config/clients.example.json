@@ -1,0 +1,19 @@
+{
+  "clients": [
+    {
+      "name": "Optio Demo",
+      "keywords": {
+        "any": ["OptioRx", "Optio Rx", "Optio RX", "Optio Rx LLC", "optiorx"],
+        "all": [],
+        "exclude": []
+      },
+      "sources": {
+        "reddit": true,
+        "x": true,
+        "facebook": true,
+        "web": true
+      },
+      "schedule": "weekly"
+    }
+  ]
+}

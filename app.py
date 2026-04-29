@@ -2,6 +2,8 @@
 Gradio entrypoint for Sentiment Analyzer.
 """
 
+import os
+
 import gradio as gr
 
 from core.platforms import platform_scope_text
@@ -67,7 +69,7 @@ APP_CSS = """
 
 # Build the Gradio interface and wire it to the search/export callbacks.
 def build_ui() -> gr.Blocks:
-    with gr.Blocks(title="Sentiment Analyzer") as demo:
+    with gr.Blocks(title="Sentiment Analyzer", css=APP_CSS) as demo:
         # Explain the app flow at the top of the page.
         gr.Markdown(
             "# Sentiment Analyzer\n"
@@ -113,4 +115,8 @@ demo = build_ui()
 
 # Start a shareable Gradio app when the file is run as a script.
 if __name__ == "__main__":
-    demo.launch(share=True, css=APP_CSS)
+    demo.launch(
+        server_name=os.getenv("GRADIO_SERVER_NAME", "0.0.0.0"),
+        server_port=int(os.getenv("PORT", os.getenv("GRADIO_SERVER_PORT", "7860"))),
+        share=(os.getenv("GRADIO_SHARE", "").lower() in {"1", "true", "yes"}),
+    )
