@@ -95,6 +95,12 @@ Run it manually:
 gcloud run jobs execute sentiment-report-job --region us-central1
 ```
 
+For a cheap config-only smoke test, run the job locally or in Cloud Run with `--dry-run` before enabling the schedule:
+
+```bash
+python jobs/generate_scheduled_reports.py --clients-file config/clients.example.json --dry-run
+```
+
 Schedule it weekly:
 
 ```bash

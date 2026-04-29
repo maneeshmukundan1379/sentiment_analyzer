@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
-import json
 import os
 from pathlib import Path
 import shutil
@@ -19,8 +18,10 @@ APP_ROOT_PATH = Path(__file__).resolve().parents[1]
 if str(APP_ROOT_PATH) not in sys.path:
     sys.path.insert(0, str(APP_ROOT_PATH))
 
+from core.client_config import ClientReportConfig, KeywordRules, load_client_report_configs
 from core.env import APP_ROOT, load_app_env
-from logic import generate_pdf_report, search_social_keyword
+from core.platforms import SEARCH_ACTIVE_PLATFORMS
+from logic import generate_pdf_report, search_keyword_rules
 
 try:
     from google.cloud import storage
@@ -39,32 +40,39 @@ def _env_keywords() -> list[str]:
     return [item.strip() for item in (os.getenv("REPORT_KEYWORDS") or "").split(",") if item.strip()]
 
 
-def _clients_file_keywords(path: str) -> list[str]:
+def _clients_file_configs(path: str) -> list[ClientReportConfig]:
     if not path:
         return []
     client_path = Path(path).expanduser()
     if not client_path.exists():
         raise FileNotFoundError(f"Client config file does not exist: {client_path}")
-
-    payload = json.loads(client_path.read_text(encoding="utf-8"))
-    keywords: list[str] = []
-    for client in payload.get("clients", []):
-        client_keywords = client.get("keywords", {})
-        if isinstance(client_keywords, list):
-            keywords.extend(str(item).strip() for item in client_keywords)
-            continue
-        keywords.extend(str(item).strip() for item in client_keywords.get("any", []))
-    return [keyword for keyword in keywords if keyword]
+    return load_client_report_configs(client_path)
 
 
-def _resolve_keywords(args: argparse.Namespace) -> list[str]:
+def _resolve_report_configs(args: argparse.Namespace) -> list[ClientReportConfig]:
     keywords = [item.strip() for item in args.keywords if item.strip()]
     if keywords:
-        return keywords
-    config_keywords = _clients_file_keywords(args.clients_file)
-    if config_keywords:
-        return config_keywords
-    return _env_keywords()
+        return [
+            ClientReportConfig(
+                name=keyword,
+                keywords=KeywordRules(any=(keyword,)),
+                platforms=(),
+            )
+            for keyword in keywords
+        ]
+
+    client_configs = _clients_file_configs(args.clients_file)
+    if client_configs:
+        return client_configs
+
+    return [
+        ClientReportConfig(
+            name=keyword,
+            keywords=KeywordRules(any=(keyword,)),
+            platforms=(),
+        )
+        for keyword in _env_keywords()
+    ]
 
 
 def _upload_to_gcs(local_path: Path, bucket_name: str, prefix: str) -> str:
@@ -79,18 +87,28 @@ def _upload_to_gcs(local_path: Path, bucket_name: str, prefix: str) -> str:
     return f"gs://{bucket_name}/{object_name}"
 
 
-def _write_report(keyword: str, output_dir: Path) -> Path:
-    status, _html, _cleared_keyword, searched_keyword, records_payload = search_social_keyword(keyword)
+def _write_report(config: ClientReportConfig, output_dir: Path) -> Path:
+    active_platforms = config.platforms or SEARCH_ACTIVE_PLATFORMS
+    status, _html, _cleared_keyword, searched_keyword, records_payload = search_keyword_rules(
+        config.keywords,
+        display_keyword=config.name,
+        active_platforms=active_platforms,
+    )
     if not records_payload or records_payload == "[]":
         raise RuntimeError(status)
 
-    pdf_status, temp_pdf_path = generate_pdf_report(records_payload, searched_keyword)
+    pdf_status, temp_pdf_path = generate_pdf_report(
+        records_payload,
+        searched_keyword,
+        report_name=config.name,
+        platforms=active_platforms,
+    )
     if not temp_pdf_path:
         raise RuntimeError(pdf_status)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    final_path = output_dir / f"{timestamp}-{_slugify(searched_keyword)}.pdf"
+    final_path = output_dir / f"{timestamp}-{_slugify(config.name or searched_keyword)}.pdf"
     shutil.copyfile(temp_pdf_path, final_path)
     return final_path
 
@@ -119,26 +137,37 @@ def main() -> int:
         default=os.getenv("REPORT_GCS_PREFIX", "sentiment-reports"),
         help="Object prefix when uploading PDFs to Google Cloud Storage.",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print resolved report configs without collecting data or generating PDFs.",
+    )
     args = parser.parse_args()
 
-    keywords = _resolve_keywords(args)
-    if not keywords:
-        print("No keywords supplied. Pass CLI keywords or set REPORT_KEYWORDS.", file=sys.stderr)
+    configs = _resolve_report_configs(args)
+    if not configs:
+        print("No report configs supplied. Pass CLI keywords, --clients-file, or REPORT_KEYWORDS.", file=sys.stderr)
         return 2
+    if args.dry_run:
+        for config in configs:
+            platforms = ", ".join(config.platforms or SEARCH_ACTIVE_PLATFORMS)
+            terms = ", ".join(config.keywords.any)
+            print(f"{config.name}: keywords=[{terms}] platforms=[{platforms}] schedule={config.schedule}")
+        return 0
 
     output_dir = Path(args.output_dir).expanduser().resolve()
     failures = 0
-    for keyword in keywords:
+    for config in configs:
         try:
-            path = _write_report(keyword, output_dir)
+            path = _write_report(config, output_dir)
             if args.gcs_bucket:
                 uri = _upload_to_gcs(path, args.gcs_bucket, args.gcs_prefix)
-                print(f"{keyword}: wrote {path} and uploaded {uri}")
+                print(f"{config.name}: wrote {path} and uploaded {uri}")
             else:
-                print(f"{keyword}: wrote {path}")
+                print(f"{config.name}: wrote {path}")
         except Exception as exc:
             failures += 1
-            print(f"{keyword}: failed: {exc}", file=sys.stderr)
+            print(f"{config.name}: failed: {exc}", file=sys.stderr)
 
     return 1 if failures else 0
 

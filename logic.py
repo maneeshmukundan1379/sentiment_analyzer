@@ -7,9 +7,11 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
+from core.client_config import KeywordRules
 from core.formatting import dedupe_records, format_records_for_html, platform_counts, sort_records
 from core.platforms import FACEBOOK_PLATFORM, REDDIT_PLATFORM, SEARCH_ACTIVE_PLATFORMS, X_PLATFORM, platform_list_text
 from core.records import serialize_records
+from core.text_utils import contains_exact_keyword
 from core.time_window import lookback_past_text
 from platform_agents import facebook_agent, reddit_agent, x_agent
 from platform_agents.enrichment_agent import enrich_records
@@ -32,13 +34,16 @@ async def _run_platform_search(
 
 
 # Launch collectors for SEARCH_ACTIVE_PLATFORMS only (others are skipped, not removed).
-async def _search_all_platforms_async(keyword: str) -> list[tuple[str, list[dict], str | None]]:
+async def _search_all_platforms_async(
+    keyword: str,
+    active_platforms: tuple[str, ...] = SEARCH_ACTIVE_PLATFORMS,
+) -> list[tuple[str, list[dict], str | None]]:
     tasks: list[object] = []
-    if REDDIT_PLATFORM in SEARCH_ACTIVE_PLATFORMS:
+    if REDDIT_PLATFORM in active_platforms:
         tasks.append(_run_platform_search(REDDIT_PLATFORM, reddit_agent.search_keyword, keyword))
-    if X_PLATFORM in SEARCH_ACTIVE_PLATFORMS:
+    if X_PLATFORM in active_platforms:
         tasks.append(_run_platform_search(X_PLATFORM, x_agent.search_keyword, keyword, x_agent.get_last_warning))
-    if FACEBOOK_PLATFORM in SEARCH_ACTIVE_PLATFORMS:
+    if FACEBOOK_PLATFORM in active_platforms:
         tasks.append(_run_platform_search(FACEBOOK_PLATFORM, facebook_agent.search_keyword, keyword))
     return list(await asyncio.gather(*tasks))
 
@@ -53,6 +58,31 @@ def _run_async(coro: object) -> object:
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(lambda: asyncio.run(coro))
         return future.result()
+
+
+def _platform_list_text(active_platforms: tuple[str, ...]) -> str:
+    if active_platforms == SEARCH_ACTIVE_PLATFORMS:
+        return platform_list_text()
+    return ", ".join(active_platforms)
+
+
+def _record_search_text(record: dict) -> str:
+    return " ".join(
+        str(record.get(key) or "")
+        for key in ("subject", "text", "community", "user_id", "location_hint")
+    )
+
+
+def _apply_keyword_rules(records: list[dict], rules: KeywordRules) -> list[dict]:
+    filtered: list[dict] = []
+    for record in records:
+        text = _record_search_text(record)
+        if rules.all and not all(contains_exact_keyword(text, term) for term in rules.all):
+            continue
+        if rules.exclude and any(contains_exact_keyword(text, term) for term in rules.exclude):
+            continue
+        filtered.append(record)
+    return filtered
 
 
 # Orchestrate collection, deduplication, enrichment, and status formatting for the UI.
@@ -98,3 +128,51 @@ def search_social_keyword(keyword: str) -> tuple[str, str, str, str, str]:
     if warnings:
         status += " Warnings: " + "; ".join(warnings)
     return status, format_records_for_html(enriched, clean_keyword), "", clean_keyword, serialize_records(enriched)
+
+
+def search_keyword_rules(
+    rules: KeywordRules,
+    *,
+    display_keyword: str,
+    active_platforms: tuple[str, ...] = SEARCH_ACTIVE_PLATFORMS,
+) -> tuple[str, str, str, str, str]:
+    search_terms = tuple(term.strip() for term in rules.any if term.strip())
+    clean_display_keyword = (display_keyword or ", ".join(search_terms)).strip()
+    if not search_terms:
+        return "Enter at least one keyword to search.", "", "", clean_display_keyword, "[]"
+
+    all_records: list[dict] = []
+    warnings: list[str] = []
+    for term in search_terms:
+        platform_results = _run_async(_search_all_platforms_async(term, active_platforms))
+        for platform_name, records, error in platform_results:
+            all_records.extend(records)
+            if error:
+                warnings.append(f"{term} / {platform_name}: {error}")
+
+    all_records = _apply_keyword_rules(dedupe_records(all_records), rules)
+    all_records = sort_records(all_records)
+
+    try:
+        enriched = enrich_records(all_records)
+    except Exception as exc:
+        warnings.append(f"Gemini enrichment: {exc}")
+        enriched = all_records
+
+    if not enriched:
+        warning_text = f" Warnings: {'; '.join(warnings)}" if warnings else ""
+        return (
+            f"No {_platform_list_text(active_platforms)} posts/comments found for '{clean_display_keyword}' "
+            f"in the {lookback_past_text()}.{warning_text}",
+            "",
+            "",
+            clean_display_keyword,
+            "[]",
+        )
+
+    counts = platform_counts(enriched)
+    count_parts = [f"{platform}: {counts.get(platform, 0)}" for platform in active_platforms]
+    status = f"Found {len(enriched)} matches for '{clean_display_keyword}' ({', '.join(count_parts)})."
+    if warnings:
+        status += " Warnings: " + "; ".join(warnings)
+    return status, format_records_for_html(enriched, clean_display_keyword), "", clean_display_keyword, serialize_records(enriched)

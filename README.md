@@ -82,6 +82,12 @@ Or use a JSON client config:
 python jobs/generate_scheduled_reports.py --clients-file config/clients.example.json
 ```
 
+Validate report configuration without running API calls:
+
+```bash
+python jobs/generate_scheduled_reports.py --clients-file config/clients.example.json --dry-run
+```
+
 The job runs the same collection and Gemini enrichment flow as the UI, then writes timestamped PDFs to the output directory. In production, wire this command to the platform scheduler, for example GitHub Actions cron, Render Cron Job, Cloud Run Jobs plus Cloud Scheduler, or a container cron.
 
 ## Google Cloud MVP Deployment

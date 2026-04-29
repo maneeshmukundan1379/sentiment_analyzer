@@ -13,7 +13,7 @@ import unicodedata
 
 from fpdf import FPDF
 
-from core.platforms import SEARCH_ACTIVE_PLATFORMS
+from core.platforms import PLATFORM_ORDER, SEARCH_ACTIVE_PLATFORMS
 from core.formatting import format_timestamp, link_label, normalize_sentiment, sentiment_colors
 from core.records import deserialize_records
 
@@ -103,9 +103,15 @@ def _pdf_export_date_range_utc() -> tuple[str, str]:
     return start.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d")
 
 
-def _pdf_export_basename() -> str:
+def _safe_filename_part(value: str) -> str:
+    safe = "".join(ch if ch.isalnum() or ch in {" ", "-", "_"} else "_" for ch in value).strip()
+    return re.sub(r"\s+", " ", safe) or "Sentiment Report"
+
+
+def _pdf_export_basename(report_name: str, platforms: list[str]) -> str:
     start_d, end_d = _pdf_export_date_range_utc()
-    name = f"OptioRx Reddit Sentiment Analysis {start_d}_{end_d}.pdf"
+    platform_text = " ".join(platforms) if platforms else "Social"
+    name = f"{_safe_filename_part(report_name)} {_safe_filename_part(platform_text)} Sentiment Analysis {start_d}_{end_d}.pdf"
     return "".join(ch if ch not in '<>:"/\\|?*' else "_" for ch in name)
 
 
@@ -160,7 +166,7 @@ def _summary_counts(records: list[dict]) -> tuple[int, int, Counter]:
     return total_comments, total_posts, sentiment_counts
 
 
-def _render_dashboard_header(pdf: FPDF, keyword: str) -> None:
+def _render_dashboard_header(pdf: FPDF, keyword: str, report_name: str = "") -> None:
     pdf.set_fill_color(237, 246, 249)
     pdf.rect(0, 0, pdf.w, 7, style="F")
     pdf.set_draw_color(226, 232, 240)
@@ -169,7 +175,7 @@ def _render_dashboard_header(pdf: FPDF, keyword: str) -> None:
     pdf.set_xy(pdf.l_margin, 8)
     pdf.set_font("Helvetica", "B", 8)
     pdf.set_text_color(32, 161, 151)
-    pdf.cell(12, 4, "SA")
+    pdf.cell(36, 4, "Heuristics AI")
     pdf.set_font("Helvetica", size=7)
     pdf.set_text_color(100, 116, 139)
     for item in ["Feed", "Analyze", "Overview", "Reports", "Actions"]:
@@ -178,7 +184,7 @@ def _render_dashboard_header(pdf: FPDF, keyword: str) -> None:
     pdf.set_xy(pdf.l_margin, 24)
     pdf.set_font("Helvetica", "B", 17)
     pdf.set_text_color(17, 24, 39)
-    pdf.cell(0, 8, "Sentiment Dashboard", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 8, _pdf_safe_text(report_name or "Sentiment Dashboard"), new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", size=8)
     pdf.set_text_color(100, 116, 139)
     pdf.cell(0, 5, _pdf_safe_text("Find out how your topic is perceived online."), new_x="LMARGIN", new_y="NEXT")
@@ -186,7 +192,7 @@ def _render_dashboard_header(pdf: FPDF, keyword: str) -> None:
     chip_y = 24
     chip_w = 44
     right_x = pdf.w - pdf.r_margin - chip_w
-    for label in [datetime.now(timezone.utc).strftime("%Y-%m-%d"), keyword or "Keyword"]:
+    for label in [datetime.now(timezone.utc).strftime("%Y-%m-%d"), keyword or report_name or "Keyword"]:
         pdf.set_xy(right_x, chip_y)
         _draw_panel(pdf, right_x, chip_y, chip_w, 8, fill=(255, 255, 255))
         pdf.set_xy(right_x + 3, chip_y + 2.2)
@@ -198,7 +204,7 @@ def _render_dashboard_header(pdf: FPDF, keyword: str) -> None:
     pdf.set_y(45)
 
 
-def _render_topic_overview(pdf: FPDF, records: list[dict]) -> None:
+def _render_topic_overview(pdf: FPDF, records: list[dict], platforms: list[str] | None = None) -> None:
     total_comments, total_posts, sentiment_counts = _summary_counts(records)
     platform_counts = Counter(str(record.get("platform") or "Unknown") for record in records)
     x = pdf.l_margin
@@ -238,7 +244,8 @@ def _render_topic_overview(pdf: FPDF, records: list[dict]) -> None:
     pdf.set_text_color(71, 85, 105)
     pdf.cell(0, 4, "Sources Distribution")
     max_platform = max(platform_counts.values(), default=1)
-    for row, platform in enumerate(SEARCH_ACTIVE_PLATFORMS):
+    visible_platforms = platforms or list(SEARCH_ACTIVE_PLATFORMS)
+    for row, platform in enumerate(visible_platforms):
         count = platform_counts.get(platform, 0)
         bar_y = dist_y + 8 + row * 8
         pdf.set_xy(dist_x, bar_y)
@@ -999,26 +1006,39 @@ def _render_platform_section(pdf: FPDF, platform: str, records: list[dict], *, a
 
 
 # Build the final PDF file from the serialized search results stored by Gradio.
-def generate_pdf_report(records_payload: str, keyword: str = "") -> tuple[str, str | None]:
+def generate_pdf_report(
+    records_payload: str,
+    keyword: str = "",
+    report_name: str = "",
+    platforms: tuple[str, ...] | None = None,
+) -> tuple[str, str | None]:
     records = deserialize_records(records_payload)
     clean_keyword = (keyword or "").strip()
+    clean_report_name = (report_name or clean_keyword or "Sentiment Report").strip()
     if not records:
         return "Nothing to export yet. Run a search first.", None
+
+    record_platforms = {str(record.get("platform") or "") for record in records}
+    if platforms is None:
+        ordered_platforms = [platform for platform in PLATFORM_ORDER if platform in record_platforms]
+        ordered_platforms.extend(sorted(record_platforms - set(ordered_platforms)))
+    else:
+        ordered_platforms = list(platforms)
 
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
-    _render_dashboard_header(pdf, clean_keyword)
-    _render_topic_overview(pdf, records)
+    _render_dashboard_header(pdf, clean_keyword, clean_report_name)
+    _render_topic_overview(pdf, records, ordered_platforms)
     _render_sentiment_dashboard_panel(pdf, records)
     _render_location_dashboard_panel(pdf, records)
     _render_marketing_insights(pdf, records, clean_keyword)
 
-    for index, platform in enumerate(SEARCH_ACTIVE_PLATFORMS):
+    for platform in ordered_platforms:
         platform_records = [record for record in records if record.get("platform") == platform]
         _render_platform_section(pdf, platform, platform_records, add_page=True)
 
-    basename = _pdf_export_basename()
+    basename = _pdf_export_basename(clean_report_name, ordered_platforms)
     pdf_path = os.path.join(tempfile.gettempdir(), basename)
     pdf.output(pdf_path)
 
