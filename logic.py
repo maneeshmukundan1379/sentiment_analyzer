@@ -8,7 +8,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
 from core.formatting import dedupe_records, format_records_for_html, platform_counts, sort_records
-from core.platforms import FACEBOOK_PLATFORM, REDDIT_PLATFORM, X_PLATFORM, platform_list_text
+from core.platforms import FACEBOOK_PLATFORM, REDDIT_PLATFORM, SEARCH_ACTIVE_PLATFORMS, X_PLATFORM, platform_list_text
 from core.records import serialize_records
 from core.time_window import lookback_past_text
 from platform_agents import facebook_agent, reddit_agent, x_agent
@@ -31,13 +31,16 @@ async def _run_platform_search(
         return platform_name, [], str(exc)
 
 
-# Launch the three platform collectors concurrently for a single keyword.
+# Launch collectors for SEARCH_ACTIVE_PLATFORMS only (others are skipped, not removed).
 async def _search_all_platforms_async(keyword: str) -> list[tuple[str, list[dict], str | None]]:
-    return await asyncio.gather(
-        _run_platform_search(REDDIT_PLATFORM, reddit_agent.search_keyword, keyword),
-        _run_platform_search(X_PLATFORM, x_agent.search_keyword, keyword, x_agent.get_last_warning),
-        _run_platform_search(FACEBOOK_PLATFORM, facebook_agent.search_keyword, keyword),
-    )
+    tasks: list[object] = []
+    if REDDIT_PLATFORM in SEARCH_ACTIVE_PLATFORMS:
+        tasks.append(_run_platform_search(REDDIT_PLATFORM, reddit_agent.search_keyword, keyword))
+    if X_PLATFORM in SEARCH_ACTIVE_PLATFORMS:
+        tasks.append(_run_platform_search(X_PLATFORM, x_agent.search_keyword, keyword, x_agent.get_last_warning))
+    if FACEBOOK_PLATFORM in SEARCH_ACTIVE_PLATFORMS:
+        tasks.append(_run_platform_search(FACEBOOK_PLATFORM, facebook_agent.search_keyword, keyword))
+    return list(await asyncio.gather(*tasks))
 
 
 # Support async execution whether or not the caller is already inside an event loop.
@@ -90,11 +93,8 @@ def search_social_keyword(keyword: str) -> tuple[str, str, str, str, str]:
 
     # Report a compact cross-platform summary back to the Gradio frontend.
     counts = platform_counts(enriched)
-    status = (
-        f"Found {len(enriched)} matches for '{clean_keyword}' "
-        f"({REDDIT_PLATFORM}: {counts.get(REDDIT_PLATFORM, 0)}, {FACEBOOK_PLATFORM}: {counts.get(FACEBOOK_PLATFORM, 0)}, "
-        f"{X_PLATFORM}: {counts.get(X_PLATFORM, 0)})."
-    )
+    count_parts = [f"{p}: {counts.get(p, 0)}" for p in SEARCH_ACTIVE_PLATFORMS]
+    status = f"Found {len(enriched)} matches for '{clean_keyword}' ({', '.join(count_parts)})."
     if warnings:
         status += " Warnings: " + "; ".join(warnings)
     return status, format_records_for_html(enriched, clean_keyword), "", clean_keyword, serialize_records(enriched)

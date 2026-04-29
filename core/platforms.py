@@ -17,12 +17,32 @@ PLATFORM_LINK_LABELS = {
     X_PLATFORM: "X.com Link",
 }
 
+# Platforms whose collectors run during search. Facebook and X agents remain in the codebase;
+# omit them here to skip execution. To re-enable, add FACEBOOK_PLATFORM and/or X_PLATFORM.
+SEARCH_ACTIVE_PLATFORMS: tuple[str, ...] = (REDDIT_PLATFORM,)
+
+
+def _oxford_join(items: list[str]) -> str:
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} and {items[1]}"
+    return ", ".join(items[:-1]) + f", and {items[-1]}"
+
 
 # Build human-readable platform lists for UI and prompt text.
 def platform_list_text() -> str:
-    return f"{REDDIT_PLATFORM}, {FACEBOOK_PLATFORM}, and {X_PLATFORM}"
+    return _oxford_join(list(SEARCH_ACTIVE_PLATFORMS))
 
 
 # Describe the broader Facebook scope used in prompts and status text.
 def platform_scope_text() -> str:
-    return f"{REDDIT_PLATFORM}, {X_PLATFORM}, and {FACEBOOK_SCOPE_LABEL}"
+    labels: list[str] = []
+    for platform in SEARCH_ACTIVE_PLATFORMS:
+        if platform == FACEBOOK_PLATFORM:
+            labels.append(FACEBOOK_SCOPE_LABEL)
+        else:
+            labels.append(platform)
+    return _oxford_join(labels)
