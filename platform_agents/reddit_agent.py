@@ -4,21 +4,63 @@ Reddit search agent for Sentiment Analyzer.
 
 from __future__ import annotations
 
+import time
+
 import requests
 
-from core.config import REDDIT_USER_AGENT
+from core.config import REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USER_AGENT
 from core.records import make_reddit_comment_record, make_reddit_post_record
 from core.text_utils import clean_text, contains_exact_keyword
 from core.time_window import cutoff_utc_timestamp, reddit_time_filter
 from platform_agents.enrichment_agent import filter_matching_records
 
+_ACCESS_TOKEN: str | None = None
+_ACCESS_TOKEN_EXPIRES_AT = 0.0
+
+
+# Fetch and cache an app-only OAuth token for cloud-safe Reddit Data API calls.
+def _reddit_access_token() -> str | None:
+    global _ACCESS_TOKEN, _ACCESS_TOKEN_EXPIRES_AT
+
+    if not REDDIT_CLIENT_ID or not REDDIT_CLIENT_SECRET:
+        return None
+    if _ACCESS_TOKEN and time.time() < _ACCESS_TOKEN_EXPIRES_AT - 60:
+        return _ACCESS_TOKEN
+
+    response = requests.post(
+        "https://www.reddit.com/api/v1/access_token",
+        auth=(REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET),
+        data={"grant_type": "client_credentials"},
+        headers={"User-Agent": REDDIT_USER_AGENT},
+        timeout=30,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    token = str(payload.get("access_token") or "").strip()
+    if not token:
+        raise RuntimeError("Reddit OAuth response did not include an access token.")
+
+    _ACCESS_TOKEN = token
+    _ACCESS_TOKEN_EXPIRES_AT = time.time() + int(payload.get("expires_in") or 3600)
+    return _ACCESS_TOKEN
+
 
 # Fetch Reddit listing JSON with a stable user agent and timeout.
 def _reddit_get_json(url: str, params: dict | None = None) -> dict:
+    token = _reddit_access_token()
+    headers = {"User-Agent": REDDIT_USER_AGENT}
+    if token:
+        parsed_url = url.replace("https://www.reddit.com", "https://oauth.reddit.com")
+        if parsed_url.endswith(".json"):
+            parsed_url = parsed_url[:-5]
+        headers["Authorization"] = f"Bearer {token}"
+    else:
+        parsed_url = url
+
     response = requests.get(
-        url,
+        parsed_url,
         params=params or {},
-        headers={"User-Agent": REDDIT_USER_AGENT},
+        headers=headers,
         timeout=30,
     )
     response.raise_for_status()

@@ -9,6 +9,7 @@ __pycache__/
 .env.*
 !.env.example
 .gradio/
+reports/
 *.egg-info/
 .eggs/
 dist/

@@ -9,3 +9,4 @@ snscrape
 duckduckgo-search
 facebook-scraper
 lxml_html_clean
+google-cloud-storage

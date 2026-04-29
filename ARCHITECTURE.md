@@ -15,6 +15,11 @@ There are two main user flows:
    - Reuse the serialized search results already stored in UI state
    - Build a PDF with a cover page and platform sections
 
+3. `Scheduled PDF`
+   - Run the cron-friendly job with configured keywords
+   - Collect and enrich fresh records
+   - Write timestamped PDF files to a persistent output location
+
 ## Runtime Architecture
 
 ```text
@@ -42,11 +47,15 @@ There are two main user flows:
 +------------------------------+      +------------------------------+
 | reddit_agent.py              |      | x_agent.py                   |
 | Collects matching Reddit     |      | Collects matching X posts,   |
-| posts and comments           |      | using the API first          |
+| posts and comments, using    |      | using the API first          |
+| OAuth when configured        |      |                              |
 +------------------------------+      +------------------------------+
                |                              |
                v                              v
 [Reddit public JSON endpoints]        [Official X API]
+             ^
+             |
+     [Reddit OAuth/Data API]
                                              |
                                              v
                                    [Public X web fallback]
@@ -154,6 +163,35 @@ Final output path:
                                                                 +------------------------------+
 ```
 
+## Scheduled Report Flow
+
+```text
++------------------------------+     +------------------------------+
+| Cloud scheduler / cron       | --> | jobs/generate_scheduled_     |
+| Starts at configured times   |     | reports.py                   |
++------------------------------+     +------------------------------+
+                                                |
+                                                v
+                               +------------------------------+
+                               | logic.search_social_keyword  |
+                               | Collects and enriches fresh  |
+                               | records for each keyword     |
+                               +------------------------------+
+                                                |
+                                                v
+                               +------------------------------+
+                               | pdf_agent.generate_pdf_      |
+                               | report                       |
+                               | Builds the PDF from records  |
+                               +------------------------------+
+                                                |
+                                                v
+                               +------------------------------+
+                               | reports/*.pdf or configured |
+                               | persistent storage path      |
+                               +------------------------------+
+```
+
 ## File Responsibilities
 
 ### Entry and Orchestration
@@ -177,7 +215,8 @@ Final output path:
 ### Platform Collection and AI
 
 - `platform_agents/reddit_agent.py`
-  - Searches Reddit via public Reddit JSON endpoints.
+  - Searches Reddit via OAuth-backed Data API requests when credentials are configured.
+  - Falls back to public Reddit JSON endpoints when OAuth credentials are absent.
   - Collects matching submissions and matching comments.
   - Normalizes results into the shared record format.
   - Uses Gemini match filtering before returning results.
@@ -208,6 +247,11 @@ Final output path:
   - Generates the final PDF report from serialized records.
   - Builds the title block, first-page count box, and platform sections.
   - Renders detailed record blocks for each platform.
+
+- `jobs/generate_scheduled_reports.py`
+  - CLI entrypoint for cron and cloud schedulers.
+  - Accepts keywords as CLI args or via `REPORT_KEYWORDS`.
+  - Runs the normal search flow and writes timestamped PDFs to `reports/` or a configured output directory.
 
 ### Shared Core Utilities
 
@@ -302,3 +346,6 @@ The files actively involved in PDF generation are:
 
 - The PDF generator does not recollect data.
   - It only consumes the serialized result payload already produced by the search flow.
+
+- Scheduled report generation recollects data for each run.
+  - This keeps recurring reports fresh and avoids depending on Gradio's in-memory UI state.

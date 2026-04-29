@@ -28,6 +28,7 @@
 ## Requirements
 - Python `3.10+`
 - A Gemini-compatible API key set as `GEMINI_API_KEY` or `GOOGLE_API_KEY`
+- For reliable cloud Reddit access, a registered Reddit app with `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET`
 - For reliable X.com results, an `X_BEARER_TOKEN`
 
 ## Optional Environment Settings
@@ -39,10 +40,14 @@ GEMINI_API_KEY=your_api_key_here
 # GOOGLE_API_KEY=your_api_key_here
 # GEMINI_MODEL=gemini-3.1-flash-lite-preview
 # GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
+# REDDIT_CLIENT_ID=your_reddit_client_id
+# REDDIT_CLIENT_SECRET=your_reddit_client_secret
+# REDDIT_USER_AGENT=script:sentiment-analyzer:1.0.0 (by /u/your_reddit_username)
 # X_BEARER_TOKEN=your_x_bearer_token_here
 # X_API_BASE_URL=https://api.x.com/2
 # SOCIAL_LOOKBACK_DAYS=7
 # FACEBOOK_GROUP_PAGES=5  # optional manual cap; omit for no fixed page-depth limit
+# REPORT_KEYWORDS=openai, tesla, elections
 ```
 
 ## Installation
@@ -58,9 +63,38 @@ pip install -r requirements.txt
 python app.py
 ```
 
+## Scheduled PDF Reports
+Use the cron-friendly job when deploying scheduled reports:
+
+```bash
+python jobs/generate_scheduled_reports.py "openai" "tesla" --output-dir reports
+```
+
+Or configure keywords through the environment:
+
+```bash
+REPORT_KEYWORDS="openai,tesla" python jobs/generate_scheduled_reports.py
+```
+
+Or use a JSON client config:
+
+```bash
+python jobs/generate_scheduled_reports.py --clients-file config/clients.example.json
+```
+
+The job runs the same collection and Gemini enrichment flow as the UI, then writes timestamped PDFs to the output directory. In production, wire this command to the platform scheduler, for example GitHub Actions cron, Render Cron Job, Cloud Run Jobs plus Cloud Scheduler, or a container cron.
+
+## Google Cloud MVP Deployment
+The repo includes a baseline Docker setup and Google Cloud notes:
+
+- `Dockerfile`: container entrypoint for Cloud Run.
+- `.env.example`: environment variables needed for local and cloud runs.
+- `config/clients.example.json`: starter client/keyword config.
+- `deploy/google-cloud.md`: Google Workspace, Cloud Run, Cloud Scheduler, Cloud Storage, and IAM checklist.
+
 ## Notes
 - The Gradio interface keeps the same simple one-keyword search flow as the Reddit Scroller app.
-- Reddit results are the most direct because they come from Reddit's public JSON endpoints.
+- Reddit uses OAuth when `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET` are configured, and falls back to the public JSON endpoints only for local/dev compatibility.
 - X.com now prefers the official authenticated recent-search API when `X_BEARER_TOKEN` is configured and only falls back to public search when needed.
 - The X.com fallback only keeps real `x.com` or `twitter.com` status URLs.
 - Facebook is still more fragile on the public web, so the app includes best-effort fallbacks when direct scraping is unavailable.

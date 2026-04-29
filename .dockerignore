@@ -1,0 +1,12 @@
+.git
+.gradio
+.venv
+venv
+__pycache__
+*.pyc
+.env
+.env.*
+reports
+dist
+build
+.DS_Store

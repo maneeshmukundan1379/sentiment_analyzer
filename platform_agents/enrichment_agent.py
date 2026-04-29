@@ -19,7 +19,13 @@ class MessageEnrichment(BaseModel):
     id: str = Field(..., description="Original social message id")
     sentiment: str = Field(..., description="Positive, Negative, Neutral, or Mixed")
     location: str = Field(..., description="Detected location or N/A")
-    response: str = Field(..., description="A short suggested reply tailored to the message sentiment")
+    response: str = Field(
+        ...,
+        description=(
+            "A short public reply written in the voice of a real pharmacy team (pharmacist or staff): warm, "
+            "professional, and specific to what the poster said—not generic platitudes"
+        ),
+    )
 
 
 class EnrichmentBatch(BaseModel):
@@ -57,10 +63,23 @@ response_agent = Agent(
         f"You analyze {platform_scope_text()} posts/comments and extract structured metadata. "
         "Return only valid data matching the schema. For each item, keep the same id, assign location only when "
         "clearly present from the location hint or text, otherwise N/A, assign sentiment as one of Positive, "
-        "Negative, Neutral, or Mixed, and write a short suggested response that fits the message sentiment: "
-        "empathetic and calming for Negative, upbeat for Positive, balanced for Mixed, and factual/helpful for "
-        "Neutral. Keep the response under 45 words, avoid insults or escalation, and do not claim facts not present "
-        "in the text."
+        "Negative, Neutral, or Mixed.\n\n"
+        "For the suggested **response** field, write as if you are a knowledgeable pharmacy team member replying "
+        "publicly on social media (first person plural “we” or a natural staff voice). Sound like a real pharmacy: "
+        "reference the poster’s actual topic when possible (e.g. delivery, refill timing, insurance, side effects "
+        "they mentioned, a specific product or program—only when grounded in their text). Offer concrete next steps "
+        "a pharmacy would give: call the store, speak with the pharmacist, check the label, transfer or refill "
+        "process, delivery options, or visiting in person—without inventing store hours, phone numbers, or policies "
+        "not in the post.\n\n"
+        "Tone by sentiment: Negative—apologize briefly when appropriate, validate frustration, de-escalate, offer "
+        "to help resolve it. Positive—thank them sincerely and reinforce the relationship. Mixed—acknowledge both "
+        "sides calmly. Neutral—clear, helpful, professional.\n\n"
+        "Avoid generic filler (“Thank you for sharing”, “Great question”, “We appreciate your feedback”) as the "
+        "whole reply unless paired with specific pharmacy-relevant substance. Do not sound like a chatbot or "
+        "corporate FAQ. Do not ask for protected health information in a public thread—invite them to call or "
+        "message the pharmacy privately for account-specific help.\n\n"
+        "Keep each response under 55 words, no insults or escalation, and do not state facts that are not supported "
+        "by the post."
     ),
     model=create_gemini_model(),
     output_type=EnrichmentBatch,
@@ -131,7 +150,8 @@ def enrich_records(records: list[dict]) -> list[dict]:
     for batch in chunked(payload_rows, 8):
         user_prompt = (
             "For each social record below, return an object with keys id, sentiment, location, and response.\n"
-            "The response should be a short suggested reply based on the record sentiment.\n\n"
+            "The response must read like a real pharmacy replying on social media: specific to the post, "
+            "professional, and helpful—not generic.\n\n"
             f"{batch}"
         )
         try:

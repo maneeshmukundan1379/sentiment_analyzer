@@ -5,15 +5,16 @@ PDF aggregation agent for Sentiment Analyzer.
 from __future__ import annotations
 
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import os
+import re
 import tempfile
 import unicodedata
-import re
 
 from fpdf import FPDF
 
-from core.platforms import PLATFORM_ORDER
-from core.formatting import format_timestamp, link_label, normalize_sentiment
+from core.platforms import SEARCH_ACTIVE_PLATFORMS
+from core.formatting import format_timestamp, link_label, normalize_sentiment, sentiment_colors
 from core.records import deserialize_records
 
 
@@ -88,6 +89,24 @@ def _pdf_safe_text(text: str) -> str:
 
 def _sentiment_style(sentiment: object) -> dict:
     return SENTIMENT_STYLES.get(normalize_sentiment(sentiment), SENTIMENT_STYLES["Unknown"])
+
+
+def _hex_rgb(hex_color: str) -> tuple[int, int, int]:
+    h = hex_color.lstrip("#")
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def _pdf_export_date_range_utc() -> tuple[str, str]:
+    """Filename window: start = 7 calendar days before today (UTC), end = today (UTC)."""
+    today = datetime.now(timezone.utc).date()
+    start = today - timedelta(days=7)
+    return start.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d")
+
+
+def _pdf_export_basename() -> str:
+    start_d, end_d = _pdf_export_date_range_utc()
+    name = f"OptioRx Reddit Sentiment Analysis {start_d}_{end_d}.pdf"
+    return "".join(ch if ch not in '<>:"/\\|?*' else "_" for ch in name)
 
 
 def _ensure_space(pdf: FPDF, height: float) -> None:
@@ -219,7 +238,7 @@ def _render_topic_overview(pdf: FPDF, records: list[dict]) -> None:
     pdf.set_text_color(71, 85, 105)
     pdf.cell(0, 4, "Sources Distribution")
     max_platform = max(platform_counts.values(), default=1)
-    for row, platform in enumerate(PLATFORM_ORDER):
+    for row, platform in enumerate(SEARCH_ACTIVE_PLATFORMS):
         count = platform_counts.get(platform, 0)
         bar_y = dist_y + 8 + row * 8
         pdf.set_xy(dist_x, bar_y)
@@ -653,6 +672,41 @@ def _render_sentiment_badge(pdf: FPDF, sentiment: str, x: float, y: float) -> No
     pdf.set_text_color(0, 0, 0)
 
 
+def _render_gradio_sentiment_pill(pdf: FPDF, sentiment: str, x: float, y: float) -> float:
+    """Rounded pill matching Gradio .sentiment-pill; returns pill height."""
+    sentiment_n = normalize_sentiment(sentiment)
+    text_c, bg_c, bd_c = sentiment_colors(sentiment_n)
+    label = _pdf_safe_text(sentiment_n)
+    pdf.set_font("Helvetica", "B", 8)
+    pill_w = pdf.get_string_width(label) + 4.5
+    pill_h = 5.2
+    pdf.set_fill_color(*_hex_rgb(bg_c))
+    pdf.set_draw_color(*_hex_rgb(bd_c))
+    pdf.rect(x, y, pill_w, pill_h, style="DF", round_corners=True, corner_radius=2.6)
+    pdf.set_xy(x + 2.2, y + 1.0)
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.set_text_color(*_hex_rgb(text_c))
+    pdf.cell(pill_w - 4.4, 3.8, label, align="C")
+    pdf.set_text_color(0, 0, 0)
+    return pill_h
+
+
+def _render_gradio_result_card_frame(pdf: FPDF, y_top: float, y_bottom: float, sentiment: str) -> None:
+    """Outer border and left accent bar like .result-card (border + border-left color)."""
+    if y_bottom <= y_top + 0.5:
+        return
+    card_x = pdf.l_margin
+    card_w = pdf.w - pdf.l_margin - pdf.r_margin
+    h = y_bottom - y_top
+    _, _, border_c = sentiment_colors(normalize_sentiment(sentiment))
+    br, bgc, bb = _hex_rgb(border_c)
+    pdf.set_draw_color(226, 232, 240)
+    pdf.rect(card_x, y_top, card_w, h, style="D", round_corners=True, corner_radius=2.2)
+    strip_w = 1.9
+    pdf.set_fill_color(br, bgc, bb)
+    pdf.rect(card_x + 0.35, y_top + 0.35, strip_w, max(0.0, h - 0.7), style="F")
+
+
 def _render_callout(
     pdf: FPDF,
     title: str,
@@ -698,12 +752,8 @@ def _render_cover_platform_counts(pdf: FPDF, records: list[dict]) -> None:
     pdf.set_font("Helvetica", "B", 11)
     pdf.cell(box_w - 8, 5, "Platform Match Counts", align="C", new_x="LMARGIN", new_y="NEXT")
 
-    labels = [
-        ("Reddit", counts.get("Reddit", 0)),
-        ("Facebook", counts.get("Facebook", 0)),
-        ("X.com", counts.get("X.com", 0)),
-    ]
-    segment_w = (box_w - 8) / 3
+    labels = [(platform, counts.get(platform, 0)) for platform in SEARCH_ACTIVE_PLATFORMS]
+    segment_w = (box_w - 8) / max(len(labels), 1)
     for index, (label, value) in enumerate(labels):
         current_x = box_x + 4 + index * segment_w
         pdf.set_xy(current_x, box_y + 10)
@@ -716,83 +766,221 @@ def _render_cover_platform_counts(pdf: FPDF, records: list[dict]) -> None:
     pdf.set_y(box_y + box_h + 6)
 
 
+def _suggested_response_body_lines(
+    pdf: FPDF,
+    words: list[str],
+    first_line_max: float,
+    continuation_max: float,
+) -> list[str]:
+    """Word-wrap body for suggested response: line 1 fits after bold prefix; further lines use full card width."""
+    pdf.set_font("Helvetica", size=10)
+    # Stay below the width used by multi_cell/cell so we never rely on library line-breaking
+    # (multi_cell would continue wrapped fragments under the first line instead of at inner_x).
+    eps = 1.35
+    lines: list[str] = []
+    first = True
+    idx = 0
+    while idx < len(words):
+        cap = first_line_max if first else continuation_max
+        first = False
+        use_cap = max(4.0, cap - eps)
+        acc: list[str] = []
+        while idx < len(words):
+            trial = " ".join(acc + [words[idx]])
+            if pdf.get_string_width(trial) <= use_cap:
+                acc.append(words[idx])
+                idx += 1
+            else:
+                break
+        if acc:
+            lines.append(" ".join(acc))
+            continue
+        word = words[idx]
+        segment = ""
+        for char in word:
+            cand = segment + char
+            if pdf.get_string_width(cand) <= use_cap:
+                segment = cand
+            else:
+                break
+        if not segment:
+            segment = word[0]
+        lines.append(segment)
+        remainder = word[len(segment) :]
+        if remainder:
+            words[idx] = remainder
+        else:
+            idx += 1
+    return lines
+
+
+def _render_detail_suggested_response_inline(
+    pdf: FPDF,
+    inner_x: float,
+    inner_w: float,
+    body: str,
+    *,
+    line_h: float = 5.2,
+    gap_after: float = 0.0,
+) -> None:
+    """Bold 'Suggested response:' then body on same line; wraps with further lines flush at inner_x."""
+    body_safe = _pdf_safe_text((body or "").strip() or "N/A")
+    words = body_safe.split() or ["N/A"]
+    _ensure_space(pdf, line_h * 2)
+    pdf.set_font("Helvetica", "B", 10)
+    prefix = _pdf_safe_text("Suggested response: ")
+    prefix_w = pdf.get_string_width(prefix)
+    first_max = max(8.0, inner_w - prefix_w)
+    line_strings = _suggested_response_body_lines(pdf, list(words), first_max, inner_w)
+
+    pdf.set_xy(inner_x, pdf.get_y())
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(prefix_w, line_h, prefix, ln=0)
+    pdf.set_font("Helvetica", size=10)
+    if line_strings:
+        w0 = max(6.0, inner_x + inner_w - pdf.get_x())
+        # One physical line per entry — avoids multi_cell wrapping under the prefix column.
+        pdf.cell(w0, line_h, line_strings[0], align="L", new_x="LMARGIN", new_y="NEXT")
+    for extra in line_strings[1:]:
+        pdf.set_x(inner_x)
+        pdf.cell(inner_w, line_h, extra, align="L", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_x(inner_x)
+    if gap_after > 0:
+        pdf.ln(gap_after)
+
+
 # Render each detailed record block in the PDF section body.
 def _render_details(pdf: FPDF, records: list[dict]) -> None:
     pdf.set_font("Helvetica", "B", 12)
+    pdf.set_text_color(17, 24, 39)
     pdf.cell(0, 8, "Detailed Results", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(3)
+
+    strip_and_pad = 1.9 + 3.2
+    right_pad = 3.0
+
     for index, record in enumerate(records):
-        _ensure_space(pdf, 58)
+        _ensure_space(pdf, 52)
         platform = str(record.get("platform") or "Unknown")
-        current_link_label = link_label(platform)
-        sentiment = normalize_sentiment(record.get("sentiment"))
-        style = _sentiment_style(sentiment)
-        card_x = pdf.l_margin
-        card_y = pdf.get_y()
+        sentiment_key = record.get("sentiment")
+        sentiment = normalize_sentiment(sentiment_key)
+        kind = str(record.get("kind") or "match").title()
+        created = float(record.get("created_utc") or 0)
+
         card_w = pdf.w - pdf.l_margin - pdf.r_margin
+        inner_x = pdf.l_margin + strip_and_pad
+        inner_w = max(40.0, card_w - strip_and_pad - right_pad)
 
-        pdf.set_fill_color(*style["fill"])
-        pdf.set_draw_color(*style["line"])
-        pdf.set_text_color(*style["text"])
+        y_top = pdf.get_y()
+        pdf.ln(1.2)
+        y_cur = y_top + 3.2
+
+        pdf.set_font("Helvetica", "B", 8)
+        pill_label = _pdf_safe_text(sentiment)
+        pill_w = pdf.get_string_width(pill_label) + 4.5
+        pill_x = inner_x + inner_w - pill_w
+        pill_y = y_cur
+        pill_h = _render_gradio_sentiment_pill(pdf, sentiment_key, pill_x, pill_y)
+
+        pdf.set_xy(inner_x, pill_y + 0.35)
         pdf.set_font("Helvetica", "B", 11)
-        pdf.rect(card_x, card_y, card_w, 10, style="DF")
-        pdf.set_xy(card_x + 3, card_y + 2)
-        pdf.cell(card_w - 36, 5, _pdf_safe_text(f"{platform} | {str(record.get('kind') or 'match').title()}"))
-        _render_sentiment_badge(pdf, sentiment, card_x + card_w - 31, card_y + 2)
+        pdf.set_text_color(15, 23, 42)
+        plat = _pdf_safe_text(platform)
+        plat_slot = max(10.0, inner_w - pill_w - 2.5)
+        pdf.cell(plat_slot, 5, plat, ln=0)
         pdf.set_text_color(0, 0, 0)
-        pdf.set_y(card_y + 13)
 
-        metadata_y = pdf.get_y()
-        column_w = card_w / 3
-        metadata = [
-            ("User ID", record.get("user_id", "Unknown")),
-            ("Location", record.get("location", "N/A")),
-            ("Date", format_timestamp(float(record.get("created_utc") or 0))),
-        ]
-        for col_index, (label, value) in enumerate(metadata):
-            x = card_x + col_index * column_w
-            pdf.set_xy(x, metadata_y)
-            pdf.set_font("Helvetica", "B", 8)
-            pdf.set_text_color(71, 85, 105)
-            pdf.cell(column_w, 4, _pdf_safe_text(label))
-            pdf.set_xy(x, metadata_y + 4)
-            pdf.set_font("Helvetica", size=8)
-            pdf.set_text_color(15, 23, 42)
-            pdf.multi_cell(column_w - 4, 4, _pdf_safe_text(str(value or "N/A")), align="L")
+        y_cur = pill_y + pill_h + 2.6
+        pdf.set_xy(inner_x, y_cur)
+        pdf.set_font("Helvetica", size=9)
+        pdf.set_text_color(100, 116, 139)
+        meta = _pdf_safe_text(f"{kind} | {format_timestamp(created)}")
+        pdf.multi_cell(inner_w, 4.8, meta, align="L", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_x(inner_x)
         pdf.set_text_color(0, 0, 0)
-        pdf.set_y(metadata_y + 13)
 
-        _render_label_value(pdf, "Subject", record.get("subject", "") or "N/A")
-        _render_callout(
-            pdf,
-            "Comment / Post Text",
-            record.get("text", ""),
-            fill=(248, 250, 252),
-            line=(203, 213, 225),
+        pdf.ln(1.8)
+        pdf.set_x(inner_x)
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.set_text_color(15, 23, 42)
+        pdf.multi_cell(
+            inner_w,
+            6.0,
+            _pdf_safe_text(str(record.get("subject", "") or "N/A")),
+            align="L",
+            new_x="LMARGIN",
+            new_y="NEXT",
         )
-        _render_callout(
-            pdf,
-            "Suggested Response",
-            record.get("response", "") or "N/A",
-            fill=style["fill"],
-            line=style["line"],
-            text=style["text"],
-        )
+        pdf.set_x(inner_x)
+        pdf.set_text_color(0, 0, 0)
 
+        pdf.ln(1.2)
+        pdf.set_x(inner_x)
+        pdf.set_font("Helvetica", size=10)
+        pdf.set_text_color(30, 41, 59)
+        pdf.multi_cell(
+            inner_w,
+            5.2,
+            _pdf_safe_text(str(record.get("text", "") or "")),
+            align="L",
+            new_x="LMARGIN",
+            new_y="NEXT",
+        )
+        pdf.set_x(inner_x)
+        pdf.set_text_color(0, 0, 0)
+
+        user_val = _pdf_safe_text(str(record.get("user_id", "Unknown")))
+        loc_val = _pdf_safe_text(str(record.get("location", "N/A")))
         url = str(record.get("permalink", "") or "").strip()
+        link_visible = _pdf_safe_text(link_label(platform))
+
+        pdf.set_xy(inner_x, pdf.get_y())
+        pdf.set_text_color(0, 0, 0)
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.cell(pdf.get_string_width("User: "), 5, "User: ", ln=0)
+        pdf.set_font("Helvetica", size=9)
+        pdf.cell(pdf.get_string_width(user_val), 5, user_val, ln=0)
+        pdf.cell(3.5, 5, "", ln=0)
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.cell(pdf.get_string_width("Location: "), 5, "Location: ", ln=0)
+        pdf.set_font("Helvetica", size=9)
+        pdf.cell(pdf.get_string_width(loc_val), 5, loc_val, ln=0)
         if url:
-            pdf.set_font("Helvetica", "B", 9)
-            pdf.set_text_color(51, 65, 85)
-            pdf.cell(34, 6, _pdf_safe_text(current_link_label))
-            pdf.set_font("Helvetica", size=9)
+            gap_before_link = 3.5
+            link_w = pdf.get_string_width(link_visible)
+            right_edge = pdf.w - pdf.r_margin
+            if pdf.get_x() + gap_before_link + link_w > right_edge:
+                pdf.ln(5)
+                pdf.set_x(inner_x)
+            else:
+                pdf.cell(gap_before_link, 5, "", ln=0)
             pdf.set_text_color(0, 102, 204)
-            pdf.multi_cell(0, 6, _pdf_safe_text(url), align="L", link=url, new_x="LMARGIN", new_y="NEXT")
-            pdf.set_text_color(0, 0, 0)
+            pdf.set_font("Helvetica", "U", 9)
+            pdf.cell(link_w, 5, link_visible, link=url, ln=1)
+            pdf.set_font("Helvetica", size=9)
+        else:
+            pdf.ln(5)
+        pdf.set_text_color(0, 0, 0)
+
+        pdf.ln(5.2)
+        _render_detail_suggested_response_inline(
+            pdf,
+            inner_x,
+            inner_w,
+            str(record.get("response", "") or "N/A"),
+            line_h=5.2,
+            gap_after=0.0,
+        )
+        pdf.set_text_color(0, 0, 0)
+
+        y_bottom = pdf.get_y() + 3.2
+        _render_gradio_result_card_frame(pdf, y_top, y_bottom, sentiment_key)
+        pdf.set_y(y_bottom + 3.0)
 
         if index < len(records) - 1:
-            y = pdf.get_y() + 1
-            pdf.set_draw_color(203, 213, 225)
-            pdf.line(pdf.l_margin, y, pdf.w - pdf.r_margin, y)
-            pdf.ln(5)
+            pdf.ln(0.5)
 
 
 # Render one platform section on its own page, or reuse page one for Reddit.
@@ -826,12 +1014,12 @@ def generate_pdf_report(records_payload: str, keyword: str = "") -> tuple[str, s
     _render_location_dashboard_panel(pdf, records)
     _render_marketing_insights(pdf, records, clean_keyword)
 
-    for index, platform in enumerate(PLATFORM_ORDER):
+    for index, platform in enumerate(SEARCH_ACTIVE_PLATFORMS):
         platform_records = [record for record in records if record.get("platform") == platform]
         _render_platform_section(pdf, platform, platform_records, add_page=True)
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-        pdf.output(tmp_file.name)
-        pdf_path = tmp_file.name
+    basename = _pdf_export_basename()
+    pdf_path = os.path.join(tempfile.gettempdir(), basename)
+    pdf.output(pdf_path)
 
     return "PDF is ready to download.", pdf_path
