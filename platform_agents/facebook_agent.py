@@ -14,7 +14,6 @@ from core.records import make_facebook_comment_record, make_facebook_record, mak
 from core.text_utils import clean_text, contains_exact_keyword
 from core.time_window import cutoff_utc_timestamp
 from core.web_search import combined_text_search, path_parts
-from platform_agents.enrichment_agent import filter_matching_records
 
 try:
     from facebook_scraper import get_posts
@@ -315,7 +314,7 @@ def _search_facebook_with_web_discovery(keyword: str) -> list[dict]:
             )
         )
         seen_ids.add(message_id)
-    return filter_matching_records(results, keyword)
+    return results
 
 
 # Prefer scraper-based Facebook discovery, then fall back to public web snippets.
@@ -328,7 +327,6 @@ def search_keyword(keyword: str) -> list[dict]:
     group_ids, page_ids = _discover_facebook_entities(clean_keyword)
     records = _search_discovered_facebook_groups(clean_keyword, cutoff_utc, group_ids)
     records.extend(_search_discovered_facebook_pages(clean_keyword, cutoff_utc, page_ids))
-    records = filter_matching_records(records, clean_keyword)
     if records:
         return records
     return _search_facebook_with_web_discovery(clean_keyword)

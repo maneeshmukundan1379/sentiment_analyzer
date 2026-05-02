@@ -7,7 +7,6 @@ from __future__ import annotations
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 import os
-import re
 import tempfile
 import unicodedata
 
@@ -16,6 +15,7 @@ from fpdf import FPDF
 from core.platforms import SEARCH_ACTIVE_PLATFORMS
 from core.formatting import format_timestamp, link_label, normalize_sentiment, sentiment_colors
 from core.records import deserialize_records
+from platform_agents.enrichment_agent import extract_pdf_themes
 
 
 SENTIMENT_STYLES = {
@@ -26,60 +26,6 @@ SENTIMENT_STYLES = {
     "Unknown": {"fill": (238, 242, 255), "line": (109, 123, 186), "text": (73, 84, 143)},
 }
 SENTIMENT_ORDER = ["Positive", "Negative", "Neutral", "Mixed", "Unknown"]
-STOPWORDS = {
-    "all",
-    "and",
-    "are",
-    "about",
-    "after",
-    "again",
-    "also",
-    "any",
-    "because",
-    "being",
-    "but",
-    "can",
-    "could",
-    "for",
-    "from",
-    "has",
-    "have",
-    "how",
-    "into",
-    "its",
-    "just",
-    "like",
-    "more",
-    "new",
-    "not",
-    "only",
-    "our",
-    "out",
-    "over",
-    "people",
-    "post",
-    "really",
-    "should",
-    "still",
-    "than",
-    "that",
-    "the",
-    "their",
-    "there",
-    "they",
-    "this",
-    "through",
-    "too",
-    "use",
-    "was",
-    "what",
-    "when",
-    "will",
-    "with",
-    "would",
-    "your",
-}
-
 
 # Normalize text down to PDF-safe ASCII so report generation stays robust.
 def _pdf_safe_text(text: str) -> str:
@@ -492,7 +438,7 @@ def _render_trend_chart(pdf: FPDF, records: list[dict]) -> None:
     dates = sorted(date_counts.keys())
     max_total = max(sum(date_counts[date].values()) for date in dates) or 1
 
-    _ensure_space(pdf, 72)
+    _ensure_space(pdf, 80)
     pdf.set_font("Helvetica", "B", 13)
     pdf.cell(0, 8, "Trend Over Time", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", size=9)
@@ -500,6 +446,7 @@ def _render_trend_chart(pdf: FPDF, records: list[dict]) -> None:
     pdf.cell(0, 5, "Daily volume by sentiment across the captured social results.", new_x="LMARGIN", new_y="NEXT")
     pdf.set_text_color(0, 0, 0)
 
+    pdf.ln(4)
     chart_x = pdf.l_margin
     chart_y = pdf.get_y() + 4
     chart_w = pdf.w - pdf.l_margin - pdf.r_margin
@@ -512,6 +459,7 @@ def _render_trend_chart(pdf: FPDF, records: list[dict]) -> None:
     for index, date in enumerate(dates):
         x = chart_x + index * (bar_w + bar_gap)
         y_cursor = chart_y + chart_h
+        day_total = sum(date_counts[date].values())
         for sentiment in SENTIMENT_ORDER:
             count = date_counts[date].get(sentiment, 0)
             if count <= 0:
@@ -520,52 +468,50 @@ def _render_trend_chart(pdf: FPDF, records: list[dict]) -> None:
             y_cursor -= segment_h
             pdf.set_fill_color(*_sentiment_style(sentiment)["line"])
             pdf.rect(x, y_cursor, bar_w, segment_h, style="F")
+        bar_top = y_cursor
+        label_y = bar_top - 5.0 if day_total > 0 else chart_y + 2.0
+        pdf.set_xy(x, label_y)
+        pdf.set_font("Helvetica", "B", 7)
+        pdf.set_text_color(30, 41, 59)
+        pdf.cell(bar_w, 4, _pdf_safe_text(str(day_total)), align="C")
+        pdf.set_text_color(0, 0, 0)
         pdf.set_xy(x - 1, chart_y + chart_h + 2)
         pdf.set_font("Helvetica", size=6)
         pdf.cell(bar_w + 2, 3, _pdf_safe_text(date), align="C")
     pdf.set_y(chart_y + chart_h + 10)
 
 
-def _top_themes(records: list[dict], keyword: str) -> list[tuple[str, int]]:
-    keyword_tokens = set(re.findall(r"[a-z0-9]{3,}", keyword.lower()))
-    words: list[str] = []
-    for record in records:
-        text = f"{record.get('subject', '')} {record.get('text', '')}".lower()
-        for word in re.findall(r"[a-z][a-z0-9]{2,}", text):
-            if word in STOPWORDS or word in keyword_tokens:
-                continue
-            words.append(word)
-    return Counter(words).most_common(12)
-
-
-def _render_themes(pdf: FPDF, records: list[dict], keyword: str) -> None:
-    themes = _top_themes(records, keyword)
+def _render_themes(pdf: FPDF, themes: list[tuple[str, int]]) -> None:
     if not themes:
         return
 
-    _ensure_space(pdf, 54)
+    _ensure_space(pdf, 48)
     pdf.set_font("Helvetica", "B", 13)
-    pdf.cell(0, 8, "Top Themes And Keywords", new_x="LMARGIN", new_y="NEXT")
-    max_count = max(count for _, count in themes) or 1
-    label_w = 36
-    chart_w = pdf.w - pdf.l_margin - pdf.r_margin - label_w - 16
-    for word, count in themes:
+    pdf.cell(0, 8, "Top Themes", new_x="LMARGIN", new_y="NEXT")
+    max_count = max((c for _, c in themes), default=1)
+    label_w = 78
+    chart_w = pdf.w - pdf.l_margin - pdf.r_margin - label_w - 22
+    for name, count in themes:
         _ensure_space(pdf, 8)
         pdf.set_font("Helvetica", size=9)
-        pdf.cell(label_w, 6, _pdf_safe_text(word.title()))
+        label = name if len(name) <= 54 else name[:51].rstrip() + "..."
+        pdf.cell(label_w, 6, _pdf_safe_text(label))
         pdf.set_fill_color(32, 161, 151)
         pdf.rect(pdf.get_x(), pdf.get_y() + 1.5, chart_w * count / max_count, 3.5, style="F")
         pdf.set_x(pdf.get_x() + chart_w + 4)
-        pdf.cell(10, 6, str(count), align="R", new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(4)
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.cell(16, 6, str(count), align="R", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", size=9)
+    pdf.ln(3)
+    pdf.ln(6)
 
 
-def _recommended_actions(records: list[dict], keyword: str) -> list[str]:
+def _recommended_actions(records: list[dict], themes: list[tuple[str, int]]) -> list[str]:
     counts = Counter(normalize_sentiment(record.get("sentiment")) for record in records)
-    themes = [theme for theme, _ in _top_themes(records, keyword)[:3]]
-    theme_text = ", ".join(theme.title() for theme in themes) if themes else "the highest-volume topics"
+    theme_names = [name for name, _ in themes[:3]]
+    theme_text = ", ".join(theme_names) if theme_names else "the highest-volume topics"
     actions = [
-        f"Lead campaign messaging with {theme_text} because these themes appear most often in the conversation.",
+        f"Shape campaign messaging around {theme_text}—these themes summarize the main discussion threads in this set.",
     ]
     if counts.get("Positive", 0):
         actions.append("Turn positive comments into short testimonial snippets, social proof, and ad-copy variants.")
@@ -577,12 +523,12 @@ def _recommended_actions(records: list[dict], keyword: str) -> list[str]:
     return actions[:5]
 
 
-def _render_recommended_actions(pdf: FPDF, records: list[dict], keyword: str) -> None:
+def _render_recommended_actions(pdf: FPDF, records: list[dict], themes: list[tuple[str, int]]) -> None:
     _ensure_space(pdf, 56)
     pdf.set_font("Helvetica", "B", 13)
     pdf.cell(0, 8, "Campaign-Ready Recommended Actions", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", size=10)
-    for index, action in enumerate(_recommended_actions(records, keyword), start=1):
+    for index, action in enumerate(_recommended_actions(records, themes), start=1):
         _ensure_space(pdf, 12)
         pdf.multi_cell(0, 6, _pdf_safe_text(f"{index}. {action}"), align="L", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(3)
@@ -640,8 +586,9 @@ def _render_marketing_insights(pdf: FPDF, records: list[dict], keyword: str) -> 
     pdf.ln(2)
     _render_overall_sentiment_visual(pdf, records)
     _render_trend_chart(pdf, records)
-    _render_themes(pdf, records, keyword)
-    _render_recommended_actions(pdf, records, keyword)
+    pdf_themes = extract_pdf_themes(records, keyword)
+    _render_themes(pdf, pdf_themes)
+    _render_recommended_actions(pdf, records, pdf_themes)
     _render_positive_quotes(pdf, records)
 
 

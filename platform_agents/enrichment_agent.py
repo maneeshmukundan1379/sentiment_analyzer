@@ -4,12 +4,13 @@ Gemini relevance filtering and enrichment for merged social records.
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Iterable
 
 from agents import Agent
 from pydantic import BaseModel, Field
 
-from core.platforms import platform_scope_text
+from core.platforms import REDDIT_PLATFORM, platform_scope_text
 from core.time_window import lookback_last_text
 from platform_agents.base_agent import create_gemini_model, run_agent
 
@@ -40,6 +41,38 @@ class CommentMatch(BaseModel):
 
 class CommentMatchBatch(BaseModel):
     items: list[CommentMatch]
+
+
+class PdfRedditExcerptAssignment(BaseModel):
+    excerpt_index: int = Field(
+        ...,
+        ge=0,
+        description="Line number from the numbered Reddit list: use 1..N, or 0..N-1 if zero-based.",
+    )
+    primary_theme: str = Field(
+        ...,
+        description=(
+            "Exactly ONE short substantive label (2-6 words) for this Reddit post or comment—the best single theme. "
+            "Use the same wording when the same topic appears on other lines."
+        ),
+    )
+
+
+class PdfRedditThemeResult(BaseModel):
+    assignments: list[PdfRedditExcerptAssignment] = Field(
+        default_factory=list,
+        description="One assignment per numbered excerpt 1..N; each excerpt has exactly one primary_theme.",
+        max_length=120,
+    )
+
+
+class PdfRedditThemeFallbackRow(BaseModel):
+    name: str = Field(..., description="Substantive theme label.")
+    count: int = Field(..., ge=0, description="Number of Reddit excerpts in the list for this theme.")
+
+
+class PdfRedditThemeFallbackResult(BaseModel):
+    themes: list[PdfRedditThemeFallbackRow] = Field(default_factory=list, max_length=14)
 
 
 # Configure the agent that filters weak or irrelevant keyword matches.
@@ -86,10 +119,173 @@ response_agent = Agent(
 )
 
 
+# PDF “Top themes” uses Reddit matches only: one primary theme per post/comment → real counts (scaled if sampled).
+pdf_reddit_themes_agent = Agent(
+    name="PDF Reddit Theme Extractor",
+    instructions=(
+        "You read numbered post/comment excerpts tied to a search keyword.\n\n"
+        "Return **assignments**: a list with exactly one object per numbered line, fields excerpt_index and primary_theme. "
+        "excerpt_index must match the line number (1 through N). primary_theme is exactly ONE short specific label per "
+        "line (the best single theme for that item)—not a list, not multiple themes per line.\n\n"
+        "Every integer 1..N must appear exactly once. Use consistent primary_theme strings for the same topic. "
+        "Avoid generic labels ('questions', 'comments', 'people'). Name concrete angles (insurance, wait times, "
+        "side effects, pickup delays, etc.)."
+    ),
+    model=create_gemini_model(),
+    output_type=PdfRedditThemeResult,
+)
+
+pdf_reddit_themes_fallback_agent = Agent(
+    name="PDF Reddit Theme Extractor Fallback",
+    instructions=(
+        "Numbered excerpts only. Return **themes**: up to 10 rows with name and integer count. "
+        "Each excerpt belongs to exactly one theme; the counts must sum to N. "
+        "Specific labels only, no vague single-word themes."
+    ),
+    model=create_gemini_model(),
+    output_type=PdfRedditThemeFallbackResult,
+)
+
+
 # Split large payloads into smaller batches that fit comfortably in one prompt.
 def chunked(items: list[dict], size: int) -> Iterable[list[dict]]:
     for start in range(0, len(items), size):
         yield items[start : start + size]
+
+
+def _even_sample_indices(n_records: int, max_items: int) -> list[int]:
+    if n_records <= max_items:
+        return list(range(n_records))
+    step = (n_records - 1) / (max_items - 1)
+    picks: list[int] = []
+    seen: set[int] = set()
+    for j in range(max_items):
+        idx = min(n_records - 1, int(round(j * step)))
+        if idx not in seen:
+            seen.add(idx)
+            picks.append(idx)
+    fill = 0
+    while len(picks) < max_items and fill < n_records:
+        if fill not in seen:
+            seen.add(fill)
+            picks.append(fill)
+        fill += 1
+    return picks[:max_items]
+
+
+def _reddit_records(records: list[dict]) -> list[dict]:
+    return [r for r in records if str(r.get("platform") or "").strip() == REDDIT_PLATFORM]
+
+
+def _reddit_theme_corpus(reddit_records: list[dict], max_excerpts: int) -> tuple[str, int, int]:
+    """Build numbered Reddit-only corpus: (text, excerpt_k, reddit_total)."""
+    total = len(reddit_records)
+    if total == 0:
+        return "", 0, 0
+    indices = list(range(total)) if total <= max_excerpts else _even_sample_indices(total, max_excerpts)
+    lines: list[str] = []
+    for display_i, rec_i in enumerate(indices, start=1):
+        rec = reddit_records[rec_i]
+        sub = str(rec.get("subject") or "").strip().replace("\n", " ")[:120]
+        body = str(rec.get("text") or "").strip().replace("\n", " ")[:360]
+        kind = rec.get("kind", "")
+        sent = rec.get("sentiment", "")
+        lines.append(f"{display_i}. [{kind} | {sent}] {sub} | {body}")
+    return "\n".join(lines), len(indices), total
+
+
+def _normalize_excerpt_index(raw: int, excerpt_n: int) -> int | None:
+    if excerpt_n <= 0:
+        return None
+    if 1 <= raw <= excerpt_n:
+        return raw
+    if 0 <= raw < excerpt_n:
+        return raw + 1
+    return None
+
+
+def _primary_theme_counter(assignments: list[PdfRedditExcerptAssignment], excerpt_n: int) -> Counter[str]:
+    """Each line 1..excerpt_n gets exactly one bucket (Unclassified if model skipped it)."""
+    idx_theme: dict[int, str] = {}
+    for row in assignments:
+        idx = _normalize_excerpt_index(int(row.excerpt_index), excerpt_n)
+        if idx is None:
+            continue
+        theme = (row.primary_theme or "").strip()
+        if not theme:
+            continue
+        idx_theme.setdefault(idx, theme)
+    counts: Counter[str] = Counter()
+    for line in range(1, excerpt_n + 1):
+        t = idx_theme.get(line, "Unclassified")
+        counts[t] += 1
+    return counts
+
+
+def _top_theme_row_list(counts: Counter[str], top_n: int) -> list[tuple[str, int]]:
+    return [(n, c) for n, c in counts.most_common(top_n) if c > 0]
+
+
+def _extract_reddit_themes_fallback(corpus: str, keyword: str, excerpt_k: int) -> list[tuple[str, int]]:
+    prompt = (
+        f"Search keyword (context): {keyword!r}\n"
+        f"N = {excerpt_k} numbered excerpts below. Return themes where counts sum to N.\n\n"
+        f"{corpus}"
+    )
+    try:
+        result = run_agent(pdf_reddit_themes_fallback_agent, prompt, PdfRedditThemeFallbackResult)
+    except Exception:
+        return []
+    merged: Counter[str] = Counter()
+    for row in result.themes or []:
+        name = row.name.strip()
+        if name:
+            merged[name] += max(0, int(row.count))
+    if not merged:
+        return []
+    s = sum(merged.values())
+    if s != excerpt_k and s > 0:
+        adj = Counter()
+        for k, v in merged.items():
+            adj[k] = max(0, int(round(v * excerpt_k / s)))
+        drift = excerpt_k - sum(adj.values())
+        if drift != 0 and adj:
+            mk = max(adj, key=lambda x: adj[x])
+            adj[mk] = max(0, adj[mk] + drift)
+        merged = adj
+    return _top_theme_row_list(merged, 10)
+
+
+def extract_pdf_themes(records: list[dict], keyword: str) -> list[tuple[str, int]]:
+    """Reddit-only data path: up to 10 themes; counts are raw tallies on analyzed excerpts (no scaling)."""
+    reddit = _reddit_records(records)
+    if not reddit:
+        return []
+    max_excerpts = 80
+    corpus, excerpt_k, reddit_total = _reddit_theme_corpus(reddit, max_excerpts)
+    if excerpt_k == 0:
+        return []
+    sample_note = ""
+    if excerpt_k < reddit_total:
+        sample_note = (
+            f" The export has {reddit_total} matching items; this list shows {excerpt_k} representative lines. "
+            f"Cover excerpt_index 1..{excerpt_k} only. Do not extrapolate—counts will reflect exactly these {excerpt_k} lines."
+        )
+    user_prompt = (
+        f"Search keyword (context): {keyword!r}\n"
+        f"N = {excerpt_k} numbered lines (1..{excerpt_k}).{sample_note}\n\n"
+        f"{corpus}"
+    )
+    themes: list[tuple[str, int]] = []
+    try:
+        result = run_agent(pdf_reddit_themes_agent, user_prompt, PdfRedditThemeResult)
+        counts = _primary_theme_counter(list(result.assignments or []), excerpt_k)
+        themes = _top_theme_row_list(counts, 10)
+    except Exception:
+        themes = []
+    if themes:
+        return themes
+    return _extract_reddit_themes_fallback(corpus, keyword, excerpt_k)
 
 
 # Ask Gemini which collected records are actually about the requested keyword.

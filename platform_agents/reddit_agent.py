@@ -10,7 +10,6 @@ from core.config import REDDIT_USER_AGENT
 from core.records import make_reddit_comment_record, make_reddit_post_record
 from core.text_utils import clean_text, contains_exact_keyword
 from core.time_window import cutoff_utc_timestamp, reddit_time_filter
-from platform_agents.enrichment_agent import filter_matching_records
 
 
 # Fetch Reddit listing JSON with a stable user agent and timeout.
@@ -185,4 +184,6 @@ def search_keyword(keyword: str) -> list[dict]:
             all_records.append(comment)
             seen_ids.add(comment["message_id"])
 
-    return filter_matching_records(all_records, clean_keyword)
+    # All items here already passed recency + keyword checks during collection; do not run
+    # Gemini "relevance" filtering (that step dropped otherwise matching posts/comments).
+    return all_records
